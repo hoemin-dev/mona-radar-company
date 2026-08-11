@@ -40,8 +40,13 @@ async function readCandidates(page:Page,target:string):Promise<Array<{candidate:
 async function choose(row:Locator,page:Page) {
   const clickable=row.locator('a,button,input[type="radio"],input[type="button"]').filter({visible:true}).first();
   if(await clickable.count()) await clickable.click(); else await row.click();
+  if(page.isClosed()) return;
   const confirm=page.getByRole("button",{name:/^(선택|확인|적용)$/}).filter({visible:true}).first();
-  if(await confirm.count()) await confirm.click();
+  const confirmCount=await confirm.count().catch((error)=>{
+    if(page.isClosed()) return 0;
+    throw error;
+  });
+  if(confirmCount) await confirm.click();
 }
 
 export async function resolveIndustry(page:Page,target:string,emit:(event:unknown)=>void):Promise<IndustryCandidate>{
@@ -56,7 +61,7 @@ export async function resolveIndustry(page:Page,target:string,emit:(event:unknow
   await clickExactButton(lookup,"검색");
   await lookup.waitForTimeout(500);
   const candidates=await readCandidates(lookup,target);
-  emit({type:"industry_candidates",target,candidates:candidates.map(x=>x.candidate)});
+  emit({type:"industry_candidates",target,candidates:candidates.map(x=>x.candidate),message:`Industry candidates found: ${candidates.length}`});
   if(!candidates.length) throw new Error(`TARGET_NOT_FOUND target=${target}`);
   const exact=candidates.filter(x=>normalized(x.candidate.name)===normalized(target));
   const selectable=exact.length===1?exact:candidates.length===1?candidates:[];
@@ -65,7 +70,7 @@ export async function resolveIndustry(page:Page,target:string,emit:(event:unknow
   await choose(selectable[0]!.row,lookup);
   if(closePromise) await closePromise;
   await page.bringToFront();
-  emit({type:"industry_resolved",target,industryName:selectable[0]!.candidate.name,industryCode:selectable[0]!.candidate.code});
+  emit({type:"industry_resolved",target,industryName:selectable[0]!.candidate.name,industryCode:selectable[0]!.candidate.code,message:`Industry selected: ${selectable[0]!.candidate.name} (${selectable[0]!.candidate.code??"code unavailable"})`});
   return selectable[0]!.candidate;
 }
 
@@ -84,7 +89,7 @@ async function waitForIndustryApplied(page:Page,industry:IndustryCandidate,emit:
     const code=industry.code?normalized(industry.code):"";
     const name=normalized(industry.name);
     if((code&&haystack.includes(code))||haystack.includes(name)){
-      emit({type:"industry_applied",industryCode:industry.code,industryName:industry.name,scope:snapshot});
+      emit({type:"industry_applied",industryCode:industry.code,industryName:industry.name,scope:snapshot,message:`Industry applied to company search: ${industry.name}`});
       return;
     }
     await page.waitForTimeout(250);
@@ -94,40 +99,15 @@ async function waitForIndustryApplied(page:Page,industry:IndustryCandidate,emit:
 
 export async function runCompanySearch(page:Page,industry?:IndustryCandidate,emit:(event:unknown)=>void=()=>undefined) {
   if(industry?.code||industry?.name) await waitForIndustryApplied(page,industry,emit);
-  const controls=page.locator('a:visible,button:visible,input[type="button"]:visible,input[type="submit"]:visible');
-  const labels=await controls.evaluateAll(elements=>elements.map(element=>((element as HTMLInputElement).value||element.textContent||"").replace(/\s+/g," ").trim()));
-  const resetIndices=labels.map((label,index)=>label==="초기화"?index:-1).filter(index=>index>=0);
-  const searchIndices=labels.map((label,index)=>label==="검색"?index:-1).filter(index=>index>=0);
-  const chosenIndex=await controls.evaluateAll((elements,{searchIndices,resetIndices})=>{
-    const distance=(a:Element,b:Element)=>{
-      const ancestors=new Map<Element,number>();let node:Element|null=a;let depth=0;
-      while(node){ancestors.set(node,depth++);node=node.parentElement;}
-      node=b;depth=0;while(node){const first=ancestors.get(node);if(first!==undefined)return first+depth;node=node.parentElement;depth++;}
-      return 100;
-    };
-    let best:{index:number;score:number}|undefined;
-    for(const searchIndex of searchIndices){
-      const search=elements[searchIndex]!;let score=resetIndices.length?Number.NEGATIVE_INFINITY:searchIndex;
-      if(search.closest("header,nav"))score-=500;
-      for(const resetIndex of resetIndices){
-        const reset=elements[resetIndex]!;
-        let pair=100-distance(search,reset)*10;
-        if(search.parentElement===reset.parentElement)pair+=300;
-        if(search.closest("form")&&search.closest("form")===reset.closest("form"))pair+=200;
-        if(search.compareDocumentPosition(reset)&Node.DOCUMENT_POSITION_FOLLOWING)pair+=25;
-        score=Math.max(score,pair);
-      }
-      if(!resetIndices.length)score=searchIndex;
-      if(!best||score>best.score)best={index:searchIndex,score};
-    }
-    return best?.index;
-  },{searchIndices,resetIndices});
-  if(chosenIndex===undefined) throw new Error(`COMPANY_SEARCH_BUTTON_NOT_FOUND controls=${JSON.stringify(labels)}`);
-  const button=controls.nth(chosenIndex);
-  const diagnostic=await button.evaluate((element)=>({tag:element.tagName,id:element.id,className:element.className,onclick:element.getAttribute("onclick"),value:(element as HTMLInputElement).value||undefined}));
+  const button=page.locator('button.btn.btn_blue[onclick*="doSelect"]')
+    .filter({visible:true,hasText:/^\s*검색\s*$/});
+  const buttonCount=await button.count();
+  if(buttonCount!==1) throw new Error(`COMPANY_SEARCH_BUTTON_NOT_FOUND selector=button.btn.btn_blue[onclick*="doSelect"] count=${buttonCount}`);
+  const searchButton=button.first();
+  const diagnostic=await searchButton.evaluate((element)=>({tag:element.tagName,id:element.id,className:element.className,onclick:element.getAttribute("onclick"),text:element.textContent?.trim()}));
   emit({type:"status",status:"COMPANY_SEARCHING",message:`Clicking company search button ${JSON.stringify(diagnostic)}`});
-  await button.scrollIntoViewIfNeeded();
-  await button.click({timeout:10_000});
+  await searchButton.scrollIntoViewIfNeeded();
+  await searchButton.click({timeout:10_000});
   await page.waitForLoadState("domcontentloaded").catch(()=>undefined);
   const results=page.locator(SMINFO_SELECTORS.company.resultLink).filter({visible:true});
   await results.first().waitFor({state:"visible",timeout:30_000}).catch(async()=>{

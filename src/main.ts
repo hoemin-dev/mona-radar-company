@@ -76,7 +76,7 @@ const collector = () => `
   <section class="page">
     <header><p class="eyebrow">LOCAL COLLECTION ENGINE</p><h2>Collector</h2><p>SMINFO 화면의 실제 기업·목록·페이지 버튼을 이용해 상세정보를 저장합니다.</p></header>
     ${accountPanel()}
-    <div class="target-panel"><label><b>Collector Target</b><input id="collector-target" value="${escapeHtml(collectorTarget)}" autocomplete="off"></label><small>먼저 로그인 확인만 실행할 수 있습니다. 이 과정에서는 검색·수집·DB 저장을 하지 않습니다.</small></div>
+    <div class="target-panel"><label><b>Collector Target</b><input id="collector-target" value="${escapeHtml(collectorTarget)}" autocomplete="off"></label><small>수집 시작을 누르면 로그인 확인부터 기업 수집까지 자동으로 진행합니다.</small></div>
     ${status === "TARGET_NOT_FOUND" ? '<div class="target-error"><b>Target이 잘못되었습니다.</b><span>Collector Target을 바꾸고 다시 수집 시작을 눌러주세요.</span></div>' : ""}
     <div class="guide"><b>자동 순서</b><span>1. 세션 확인</span><span>2. 필요 시 자동 로그인</span><span>3. Target 업종 검색</span><span>4. 기업 수집</span></div>
     <div class="status-grid">
@@ -86,11 +86,7 @@ const collector = () => `
       <article><span>다음 조회</span><strong>${countdown}</strong><small>60–90초 간격</small></article>
     </div>
     <div class="workspace">
-      <div class="current"><span class="pulse"></span><div><small>SINGLE TAB COLLECTION</small><h3>검증된 단일 탭 방식</h3><p>상세정보 저장 후 목록으로 돌아와 원래 작업 페이지를 복원합니다.</p></div></div>
       <div class="actions">
-        <button data-action="open">브라우저 열기</button>
-        <button class="primary" data-action="login_check" ${!credential.saved || editingCredential || ["BROWSER_STARTING", "WAITING_FOR_BROWSER", "LOGIN_IN_PROGRESS", "LOGIN_CHECKING"].includes(status) ? "disabled" : ""}>SMINFO 로그인 확인</button>
-        <button data-action="nav_test" ${status !== "READY" ? "disabled" : ""}>Navigation Test</button>
         <button class="primary" data-action="start" ${!credential.saved || editingCredential || ["BROWSER_STARTING", "WAITING_FOR_BROWSER", "RUNNING", "COLLECTING", "PAUSED", "LOGIN_IN_PROGRESS", "LOGIN_CHECKING", "INDUSTRY_SEARCHING", "COMPANY_SEARCHING", "RECOVERING", "LOGIN_FAILED", "CREDENTIAL_REQUIRED"].includes(status) ? "disabled" : ""}>수집 시작</button>
         <button data-action="pause" ${status !== "RUNNING" ? "disabled" : ""}>일시정지</button>
         <button data-action="resume" ${status !== "PAUSED" ? "disabled" : ""}>재개</button>
@@ -230,10 +226,10 @@ function render() {
     if (passwordInput) passwordInput.value = "";
     render();
   });
-  for (const action of ["open", "login_check", "nav_test", "start", "pause", "resume", "stop"]) {
+  for (const action of ["start", "pause", "resume", "stop"]) {
     document.querySelector<HTMLElement>(`[data-action=${action}]`)?.addEventListener("click", async () => {
-      const command = { open: "open_collector", login_check: "login_sminfo", nav_test: "run_navigation_test", start: "start_collection", pause: "pause_collection", resume: "resume_collection", stop: "stop_collection" }[action]!;
-       if(action === "start" || action === "login_check") {
+      const command = { start: "start_collection", pause: "pause_collection", resume: "resume_collection", stop: "stop_collection" }[action]!;
+       if(action === "start") {
          try {
            credential = await invoke<CredentialStatus>("credential_status");
            if(!credential.saved) {
@@ -253,7 +249,7 @@ function render() {
          render();
        }
        try {
-         if(action === "start" || action === "login_check") await invoke("open_collector");
+         if(action === "start") await invoke("open_collector");
          await invoke(command, action === "start" ? { target: collectorTarget.trim() || "액체 펌프 제조업" } : undefined);
        } catch (error) { logs.push(`ERROR ${String(error)}`); }
       render();
