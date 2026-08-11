@@ -1,0 +1,2 @@
+import { cpSync,copyFileSync,mkdirSync,rmSync } from "node:fs";import { join } from "node:path";
+const root=process.cwd(),runtime=join(root,"runtime");mkdirSync(runtime,{recursive:true});copyFileSync(process.execPath,join(runtime,"node.exe"));const modules=join(runtime,"node_modules");rmSync(modules,{recursive:true,force:true});cpSync(join(root,"node_modules"),modules,{recursive:true,filter:source=>!source.includes(`${join("src-tauri","target")}`)});

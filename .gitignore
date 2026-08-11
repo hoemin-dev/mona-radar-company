@@ -1,0 +1,28 @@
+# Node / frontend
+node_modules/
+dist/
+dist-collector/
+
+# Collector runtime
+runtime/
+
+# Rust / Tauri build outputs
+src-tauri/target/
+src-tauri/target-*/
+
+# SQLite / local DB
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Windows shortcuts / temp
+*.lnk
+*.log
+*.tmp
+Thumbs.db

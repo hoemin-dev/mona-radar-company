@@ -1,0 +1,13 @@
+<div id="window-titlebar" class="window-titlebar" data-tauri-drag-region>
+  <div class="window-title" data-tauri-drag-region>
+    <img src="/app-icon.svg" alt="" draggable="false">
+    <span data-tauri-drag-region>MONA RADAR / Company</span>
+  </div>
+  <div class="window-controls">
+    <button id="window-minimize" class="window-control" type="button" aria-label="최소화"><span class="window-minimize-icon"></span></button>
+    <button id="window-maximize" class="window-control" type="button" aria-label="최대화"><span id="window-maximize-icon" class="window-maximize-icon"></span></button>
+    <button id="window-close" class="window-control window-close" type="button" aria-label="닫기"><span class="window-close-icon"></span></button>
+  </div>
+</div>
+<div id="app"></div>
+<script type="module" src="/src/main.ts"></script>

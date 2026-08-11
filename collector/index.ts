@@ -1,0 +1,79 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import migration from "../src-tauri/migrations/001_initial.sql";
+import migration2 from "../src-tauri/migrations/002_collector_automation.sql";
+import migration3 from "../src-tauri/migrations/003_company_detail_sections.sql";
+import { openPersistentSminfo } from "./browser/prototype.js";
+import { runNavigationTest } from "./browser/navigation-test.js";
+import { collectCurrentSearch } from "./collector.js";
+import { CollectorControl } from "./control.js";
+import { Repository } from "./database/repository.js";
+import { ensureLoggedIn } from "./sminfo/session.js";
+import { resolveIndustry, runCompanySearch } from "./sminfo/industry.js";
+
+const emit = (event: unknown) => process.stdout.write(`${JSON.stringify(event)}\n`);
+const appData = process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming");
+const profile = path.join(appData, "com.monaradar.company", "collector-browser-profile");
+const dataDir = path.join(appData, "com.monaradar.company", "data");
+fs.mkdirSync(dataDir, { recursive: true });
+
+emit({ type: "status", status: "WAITING_FOR_BROWSER", message: "Opening SMINFO browser" });
+const control = new CollectorControl((status, message) => emit({ type: "status", status, message }));
+const { page } = await openPersistentSminfo(profile, emit);
+emit({ type: "status", status: "READY", message: "Collector browser is ready" });
+
+while (true) {
+  const queued = await control.waitForAction();
+  if (queued.action === "nav_test") {
+    try {
+      await runNavigationTest(page, emit);
+      emit({ type: "status", status: "READY", message: "Navigation Test succeeded; browser remains open" });
+    } catch (error) {
+      emit({ type: "error", code: "NAV_TEST_FAILED", message: error instanceof Error ? error.message : String(error) });
+      emit({ type: "status", status: "READY", message: "Navigation Test failed; browser remains open" });
+    }
+    continue;
+  }
+
+  if (queued.action === "login") {
+    const request = queued.request ?? { target: "액체 펌프 제조업" };
+    try {
+      emit({ type: "status", status: "LOGIN_IN_PROGRESS", message: "Signing in to SMINFO" });
+      await ensureLoggedIn(page, request.credential, emit);
+      request.credential = undefined;
+      emit({ type: "login_status", loggedIn: true, message: "SMINFO login succeeded" });
+      emit({ type: "status", status: "READY", message: "SMINFO account is ready; company search page opened" });
+    } catch (error) {
+      request.credential = undefined;
+      emit({ type: "login_status", loggedIn: false, message: "SMINFO login failed" });
+      emit({ type: "error", code: error instanceof Error ? error.message : "LOGIN_FAILED", message: "SMINFO 자동 로그인에 실패했습니다. 저장된 계정 정보를 확인해주세요." });
+      emit({ type: "status", status: "LOGIN_FAILED", message: "Account update is required" });
+    }
+    continue;
+  }
+
+  const request = queued.request ?? { target: "액체 펌프 제조업" };
+  control.beginCollection();
+  const repo = new Repository(path.join(dataDir, "mona-radar-company.sqlite3"), `${migration}\n${migration2}\n${migration3}`);
+  try {
+    emit({ type: "status", status: "LOGIN_CHECKING", message: "Checking SMINFO login session" });
+    const loginMode = await ensureLoggedIn(page, request.credential, emit);
+    request.credential = undefined;
+    emit({ type: "login_status", loggedIn: true, message: loginMode === "SESSION_REUSED" ? "Existing SMINFO session reused" : "SMINFO automatic login succeeded" });
+    emit({ type: "status", status: "INDUSTRY_SEARCHING", message: `Searching SMINFO industry: ${request.target}` });
+    const industry = await resolveIndustry(page, request.target, emit);
+    emit({ type: "status", status: "COMPANY_SEARCHING", message: `Searching companies: ${industry.name}` });
+    await runCompanySearch(page, industry, emit);
+    const targetId = repo.upsertTarget(request.target, industry.code, industry.name);
+    await collectCurrentSearch(page, repo, emit, undefined, control, targetId);
+  } catch (error) {
+    const message=error instanceof Error ? error.message : String(error);
+    const credentialRequired=message.includes("CREDENTIAL_REQUIRED");
+    emit({ type: "error", code: credentialRequired?"CREDENTIAL_REQUIRED":"COLLECTION_FAILED", message });
+    emit({ type: "status", status: credentialRequired?"CREDENTIAL_REQUIRED":"ERROR", message: credentialRequired?"SMINFO 계정 등록이 필요합니다.":"Collection failed; Start or Stop is available" });
+  } finally {
+    control.endCollection();
+    repo.close();
+  }
+}
