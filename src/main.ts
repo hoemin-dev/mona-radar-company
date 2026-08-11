@@ -70,13 +70,14 @@ function setupWindowChrome() {
 
 const accountPanel = () => credential.saved && !editingCredential ? `
   <div class="account-panel"><div><b>SMINFO Account</b><span>ID: <strong>${escapeHtml(credential.username ?? "")}</strong></span><span>Password: <strong class="good">● Windows에 저장됨</strong></span><span>Login: <strong class="${loggedIn ? "good" : "muted"}">${loggedIn ? "● Logged in" : "○ 시작 시 자동 확인"}</strong></span></div><div class="account-actions"><button data-action="edit_account">계정 변경</button><button data-action="delete_account">저장정보 삭제</button></div></div>` : `
-  <div class="account-panel account-form"><div><b>SMINFO Account</b><span>저장된 비밀번호는 보안상 다시 표시하지 않습니다. 계정 변경 시 새 비밀번호를 입력하세요.</span></div><label>ID<input id="sminfo-id" autocomplete="username" value="${escapeHtml(credential.username ?? "")}"></label><label>Password<input id="sminfo-password" type="password" autocomplete="current-password"></label><button class="primary" data-action="save_account">계정 저장</button></div>`;
+  <div class="account-panel account-form"><div><b>SMINFO Account</b><span>저장된 비밀번호는 보안상 다시 표시하지 않습니다. 계정 변경 시 새 비밀번호를 입력하세요.</span></div><label>ID<input id="sminfo-id" autocomplete="username" value="${escapeHtml(credential.username ?? "")}"></label><label>Password<input id="sminfo-password" type="password" autocomplete="current-password"></label><div class="account-actions"><button class="primary" data-action="save_account">계정 저장</button>${credential.saved ? '<button data-action="cancel_account">취소</button>' : ""}</div></div>`;
 
 const collector = () => `
   <section class="page">
     <header><p class="eyebrow">LOCAL COLLECTION ENGINE</p><h2>Collector</h2><p>SMINFO 화면의 실제 기업·목록·페이지 버튼을 이용해 상세정보를 저장합니다.</p></header>
     ${accountPanel()}
     <div class="target-panel"><label><b>Collector Target</b><input id="collector-target" value="${escapeHtml(collectorTarget)}" autocomplete="off"></label><small>먼저 로그인 확인만 실행할 수 있습니다. 이 과정에서는 검색·수집·DB 저장을 하지 않습니다.</small></div>
+    ${status === "TARGET_NOT_FOUND" ? '<div class="target-error"><b>Target이 잘못되었습니다.</b><span>Collector Target을 바꾸고 다시 수집 시작을 눌러주세요.</span></div>' : ""}
     <div class="guide"><b>자동 순서</b><span>1. 세션 확인</span><span>2. 필요 시 자동 로그인</span><span>3. Target 업종 검색</span><span>4. 기업 수집</span></div>
     <div class="status-grid">
       <article><span>브라우저</span><strong>${status === "IDLE" ? "닫힘" : "실행 중"}</strong><small>로그인 프로필 유지</small></article>
@@ -206,6 +207,10 @@ function render() {
   }));
   document.querySelector<HTMLInputElement>("#collector-target")?.addEventListener("input", (event) => { collectorTarget = (event.target as HTMLInputElement).value; });
   document.querySelector<HTMLElement>("[data-action=edit_account]")?.addEventListener("click", () => { editingCredential = true; render(); });
+  document.querySelector<HTMLElement>("[data-action=cancel_account]")?.addEventListener("click", () => {
+    editingCredential = false;
+    render();
+  });
   document.querySelector<HTMLElement>("[data-action=delete_account]")?.addEventListener("click", async () => {
     try { credential = await invoke<CredentialStatus>("delete_sminfo_credential"); loggedIn = false; editingCredential = true; } catch (error) { logs.push(`ERROR ${String(error)}`); }
     render();

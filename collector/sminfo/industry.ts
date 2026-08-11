@@ -135,4 +135,8 @@ export async function runCompanySearch(page:Page,industry?:IndustryCandidate,emi
     if(/검색결과가\s*없|조회된\s*데이터가\s*없|0\s*건/.test(text)) throw new Error("COMPANY_SEARCH_ZERO_RESULTS");
     throw new Error(`COMPANY_SEARCH_RESULT_NOT_FOUND url=${page.url()}`);
   });
+  const bodyText=clean(await page.locator("body").innerText());
+  const totalText=bodyText.match(/검색결과\s*([\d,]+)\s*건/)?.[1];
+  const total=totalText?Number(totalText.replace(/,/g,"")):undefined;
+  emit({type:"company_search_ready",total,message:total===undefined?"SMINFO company search results loaded":`SMINFO company search results: ${total.toLocaleString()} companies`});
 }

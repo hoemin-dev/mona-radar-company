@@ -70,8 +70,16 @@ while (true) {
   } catch (error) {
     const message=error instanceof Error ? error.message : String(error);
     const credentialRequired=message.includes("CREDENTIAL_REQUIRED");
-    emit({ type: "error", code: credentialRequired?"CREDENTIAL_REQUIRED":"COLLECTION_FAILED", message });
-    emit({ type: "status", status: credentialRequired?"CREDENTIAL_REQUIRED":"ERROR", message: credentialRequired?"SMINFO 계정 등록이 필요합니다.":"Collection failed; Start or Stop is available" });
+    const targetInvalid=["TARGET_NOT_FOUND","INDUSTRY_SELECTION_REQUIRED","INDUSTRY_NOT_APPLIED","COMPANY_SEARCH_ZERO_RESULTS"].some(code=>message.includes(code));
+    const code=credentialRequired?"CREDENTIAL_REQUIRED":targetInvalid?"TARGET_NOT_FOUND":"COLLECTION_FAILED";
+    const nextStatus=credentialRequired?"CREDENTIAL_REQUIRED":targetInvalid?"TARGET_NOT_FOUND":"ERROR";
+    const statusMessage=credentialRequired
+      ?"SMINFO 계정 등록이 필요합니다."
+      :targetInvalid
+        ?"Target이 잘못되었습니다. Target을 바꾸고 다시 수집 시작을 눌러주세요."
+        :"Collection failed; Start or Stop is available";
+    emit({ type: "error", code, message });
+    emit({ type: "status", status: nextStatus, message: statusMessage });
   } finally {
     control.endCollection();
     repo.close();
