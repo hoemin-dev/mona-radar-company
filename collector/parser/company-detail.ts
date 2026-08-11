@@ -62,15 +62,16 @@ export function parseCompanyDetail(html: string): CompanyDetail {
   const designations: DesignationInfo[] = [];
 
   $("table").each((_, table) => {
-    const headerRow = $(table).find("tr").filter((__, row) => $(row).find("th").length > 0).first();
+    let headerRow = $(table).find("tr").filter((__, row) => $(row).find("th").length > 0).first();
+    if(!headerRow.length) headerRow=$(table).find("tr").first();
     const headers = headerRow.find("th,td").map((__, cell) => clean($(cell).text())).get();
     if (!headers.length) return;
     const rows = headerRow.nextAll("tr");
-    const sectionText = clean($(table).prevAll("h1,h2,h3,h4,h5,strong,.title,.tit").first().text());
+    const sectionText = clean($(table).closest("section[data-sminfo-section]").attr("data-sminfo-section") ?? $(table).prevAll("h1,h2,h3,h4,h5,strong,.title,.tit").first().text());
     const cellsFor = (row: any) => $(row).find("td").map((___, cell) => clean($(cell).text())).get();
     const textAt = (cells:string[],names:string[]) => { const at=headerIndex(headers,names); return at<0?undefined:(cells[at]||undefined); };
 
-    const yearAt = headerIndex(headers, ["\uACB0\uC0B0\uC5F0\uB3C4", "\uAE30\uC900\uC5F0\uB3C4", "\uD68C\uACC4\uC5F0\uB3C4"]);
+    const yearAt = headerIndex(headers, ["\uACB0\uC0B0\uC5F0\uB3C4", "\uAE30\uC900\uC5F0\uB3C4", "\uD68C\uACC4\uC5F0\uB3C4", "기준년도", "연도"]);
     if (yearAt >= 0) {
       rows.each((__, row) => {
         const values = $(row).find("td").map((___, cell) => clean($(cell).text())).get();

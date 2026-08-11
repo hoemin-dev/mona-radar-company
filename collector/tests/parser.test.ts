@@ -39,4 +39,10 @@ describe("SMINFO semantic parsers", () => {
     expect(result.certifications).toEqual([{ certificationName: "ISO 9001", certificationNumber: "ISO-001", issuer: "KAB", acquiredDate: "2024-01-01", validUntil: "2027-01-01" }]);
     expect(result.designations).toEqual([{ designationName: "벤처기업", designationNumber: "V-001", authority: "중소벤처기업부", designatedDate: "2025-01-01", validUntil: undefined }]);
   });
+
+  it("reads legacy td-only tables from captured detail sections",()=>{
+    const result=parseCompanyDetail(`<section data-sminfo-section="매출현황"><table><tr><td>연도</td><td>매출액</td><td>영업이익</td></tr><tr><td>2025</td><td>1,258</td><td>73</td></tr></table></section><section data-sminfo-section="연혁"><table><tr><td>일자</td><td>내용</td></tr><tr><td>2024-01</td><td>공장 준공</td></tr></table></section>`);
+    expect(result.financialStatements).toEqual([expect.objectContaining({fiscalYear:2025,revenue:1258,operatingIncome:73})]);
+    expect(result.histories).toEqual([{eventDate:"2024-01",description:"공장 준공"}]);
+  });
 });
