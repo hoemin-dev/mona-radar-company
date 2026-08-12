@@ -1,7 +1,7 @@
 import { createInterface, type Interface } from "node:readline";
 import type { Readable } from "node:stream";
 
-export type CollectorAction = "start" | "login" | "nav_test";
+export type CollectorAction = "start" | "login" | "nav_test" | "shutdown";
 export interface StartRequest { target: string; credential?: { username: string; password: string } }
 export interface QueuedCollectorAction { action: CollectorAction; request?: StartRequest }
 type StateEmitter = (status: "RUNNING" | "PAUSED" | "STOPPED", message: string) => void;
@@ -14,6 +14,7 @@ export class CollectorControl {
   private actionResolve: ((action: QueuedCollectorAction) => void) | undefined;
   private pendingActions: QueuedCollectorAction[] = [];
   private lastTarget = "액체 펌프 제조업";
+  shutdownRequested = false;
 
   constructor(onState: StateEmitter = () => undefined, input: Readable = process.stdin) {
     this.lines = createInterface({ input });
@@ -76,6 +77,14 @@ export class CollectorControl {
         this.stopped = true;
         this.paused = false;
         onState("STOPPED", this.active ? "Stopping collection" : "Collection stopped");
+        return;
+      }
+      if(command === "shutdown"){
+        this.shutdownRequested=true;
+        this.stopped=true;
+        this.paused=false;
+        onState("STOPPED","Collector is shutting down");
+        if(!this.active)this.dispatch("shutdown");
       }
     });
   }

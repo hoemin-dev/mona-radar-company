@@ -20,11 +20,12 @@ fs.mkdirSync(dataDir, { recursive: true });
 
 emit({ type: "status", status: "WAITING_FOR_BROWSER", message: "Opening SMINFO browser" });
 const control = new CollectorControl((status, message) => emit({ type: "status", status, message }));
-const { page } = await openPersistentSminfo(profile, emit);
+const { context, page } = await openPersistentSminfo(profile, emit);
 emit({ type: "status", status: "READY", message: "Collector browser is ready" });
 
 while (true) {
   const queued = await control.waitForAction();
+  if(queued.action === "shutdown")break;
   if (queued.action === "nav_test") {
     try {
       await runNavigationTest(page, emit);
@@ -84,4 +85,8 @@ while (true) {
     control.endCollection();
     repo.close();
   }
+  if(control.shutdownRequested)break;
 }
+
+control.dispose();
+await context.close().catch(()=>undefined);

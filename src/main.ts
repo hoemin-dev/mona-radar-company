@@ -42,6 +42,26 @@ const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (
 }[char]!));
 const amount = (value?: number) => value === undefined || value === null ? "—" : `${value.toLocaleString()}백만원`;
 
+async function copyLogs(){
+  const text=logs.join("\r\n");
+  if(!text)return;
+  try{
+    await navigator.clipboard.writeText(text);
+  }catch{
+    const area=document.createElement("textarea");
+    area.value=text;
+    area.setAttribute("readonly","");
+    area.style.position="fixed";
+    area.style.opacity="0";
+    document.body.append(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+  }
+  const button=document.querySelector<HTMLButtonElement>("[data-action=copy_logs]");
+  if(button){button.textContent="복사됨";window.setTimeout(()=>{if(button.isConnected)button.textContent="전체 복사";},1200);}
+}
+
 function setupWindowChrome() {
   if (!("__TAURI_INTERNALS__" in window)) return;
   const appWindow = getCurrentWindow();
@@ -83,7 +103,7 @@ const collector = () => `
       <article><span>브라우저</span><strong>${status === "IDLE" ? "닫힘" : "실행 중"}</strong><small>로그인 프로필 유지</small></article>
       <article><span>SMINFO 상태</span><strong>${status}</strong><small>${status === "READY" ? "수집 가능" : "브라우저 상태를 확인하세요"}</small></article>
       <article><span>현재 기업</span><strong>${escapeHtml(currentCompany)}</strong><small>저장 완료 기업</small></article>
-      <article><span>다음 조회</span><strong>${countdown}</strong><small>60–90초 간격</small></article>
+      <article><span>다음 조회</span><strong id="countdown-value">${countdown}</strong><small>60–90초 간격</small></article>
     </div>
     <div class="workspace">
       <div class="actions">
@@ -93,7 +113,7 @@ const collector = () => `
         <button data-action="stop" ${status === "IDLE" ? "disabled" : ""}>중단</button>
       </div>
     </div>
-    <div class="log"><div class="log-head"><h3>작업 로그</h3><span>최근 이벤트</span></div>${logs.length ? logs.slice(-30).reverse().map((line) => `<div class="event-row">${escapeHtml(line)}</div>`).join("") : '<div class="empty">브라우저 열기를 눌러 시작하세요.</div>'}</div>
+    <div class="log"><div class="log-head"><h3>작업 로그</h3><div><span>최근 이벤트</span><button type="button" data-action="copy_logs" ${logs.length?"":"disabled"}>전체 복사</button></div></div>${logs.length ? logs.slice(-30).reverse().map((line) => `<div class="event-row">${escapeHtml(line)}</div>`).join("") : '<div class="empty">수집 시작을 눌러 시작하세요.</div>'}</div>
   </section>`;
 
 const resultCard = (row: CompanyRow) => `
@@ -202,6 +222,7 @@ function render() {
     if (view === "search") void loadSearch(1);
   }));
   document.querySelector<HTMLInputElement>("#collector-target")?.addEventListener("input", (event) => { collectorTarget = (event.target as HTMLInputElement).value; });
+  document.querySelector<HTMLButtonElement>("[data-action=copy_logs]")?.addEventListener("click",()=>void copyLogs());
   document.querySelector<HTMLElement>("[data-action=edit_account]")?.addEventListener("click", () => { editingCredential = true; render(); });
   document.querySelector<HTMLElement>("[data-action=cancel_account]")?.addEventListener("click", () => {
     editingCredential = false;
@@ -259,6 +280,14 @@ function render() {
   if (view === "search") bindCompanyDetails();
 }
 
+function renderPreservingScroll(){
+  const scrolling=document.scrollingElement;
+  const top=scrolling?.scrollTop??0;
+  const left=scrolling?.scrollLeft??0;
+  render();
+  scrolling?.scrollTo({top,left,behavior:"instant"});
+}
+
 setupWindowChrome();
 render();
 void invoke<CredentialStatus>("credential_status").then((value) => { credential = value; if (!value.saved) editingCredential = true; if (view === "collector") render(); }).catch((error) => logs.push(`ERROR ${String(error)}`));
@@ -268,8 +297,18 @@ void listen<Record<string, unknown>>("collector-event", (event) => {
   if (data.type === "status") { status = String(data.status) as CollectorStatus; if(status === "LOGIN_FAILED" || status === "CREDENTIAL_REQUIRED") { editingCredential=true; loggedIn=false; } }
   if (data.type === "company_collected") currentCompany = String(data.companyName);
   if (data.type === "login_status") loggedIn = Boolean(data.loggedIn);
-  if (data.type === "countdown") countdown = `${String(data.seconds)}초`;
+  if (data.type === "countdown") {
+    // The countdown changes every second and already has a dedicated status
+    // card. Do not let it evict useful collector diagnostics from the log.
+    countdown = `${String(data.seconds)}초`;
+    if (view === "collector") {
+      const value=document.querySelector<HTMLElement>("#countdown-value");
+      if(value)value.textContent=countdown;
+    }
+    return;
+  }
   const message = data.type === "error" ? `${String(data.code ?? "UNKNOWN")}: ${String(data.message ?? "오류 내용 없음")}` : String(data.message ?? data.companyName ?? "");
   logs.push(`${new Date().toLocaleTimeString()} ${String(data.type)} ${message}`);
-  if (view === "collector") render();
+  if (logs.length > 200) logs.splice(0, logs.length - 200);
+  if (view === "collector") renderPreservingScroll();
 });

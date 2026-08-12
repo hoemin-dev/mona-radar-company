@@ -82,4 +82,12 @@ describe("Collector control state transitions", () => {
     await expect(control.waitForAction()).resolves.toMatchObject({action:"start",request:{credential:{username:"second"}}});
     control.dispose();
   });
+
+  it("requests process shutdown and interrupts active collection",async()=>{
+    const input=new PassThrough();const control=new CollectorControl(()=>undefined,input);control.beginCollection();
+    input.write("shutdown\n");await tick();
+    expect(control.shutdownRequested).toBe(true);
+    await expect(control.checkpoint()).rejects.toThrow("COLLECTOR_STOPPED");
+    control.endCollection();control.dispose();
+  });
 });

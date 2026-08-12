@@ -11,7 +11,7 @@ src-tauri/target/
 src-tauri/target-*/
 
 # SQLite / local DB
-*.sqlite
+*.sqlites
 *.sqlite3
 *.sqlite-shm
 *.sqlite-wal
@@ -26,3 +26,6 @@ src-tauri/target-*/
 *.log
 *.tmp
 Thumbs.db
+
+# Codex / Cargo temporary build target
+.codex-cargo-target/

@@ -95,6 +95,7 @@ export async function collectCurrentSearch(
           const detail = parseCompanyDetail(html);
           if (!detail.kcd) detail.kcd = item.sminfo_kcd;
           if (!detail.companyName) detail.companyName = item.company_name_snapshot;
+          emit({type:"detail_parsed",companyName:detail.companyName,message:`Detail parsed: financials=${detail.financialStatements.length}, sites=${detail.businessSites?.length??0}, histories=${detail.histories?.length??0}, executives=${detail.executives?.length??0}, certifications=${detail.certifications?.length??0}, designations=${detail.designations?.length??0}, factories=${detail.factories?.length??0}`});
           repo.saveCompany(item.collection_item_id, detail);
           if (targetId) repo.linkCollectedCompany(targetId, item.collection_item_id, detail.ksicCode);
           processed++;

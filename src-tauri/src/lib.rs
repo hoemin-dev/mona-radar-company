@@ -15,7 +15,79 @@ use std::os::windows::process::CommandExt;
 const MIGRATION_001: &str = include_str!("../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../migrations/002_collector_automation.sql");
 const MIGRATION_003: &str = include_str!("../migrations/003_company_detail_sections.sql");
-struct CollectorProcess(Mutex<Option<Child>>);
+#[cfg(windows)]
+struct CollectorChild {
+    child: Child,
+    job: isize,
+}
+
+#[cfg(not(windows))]
+struct CollectorChild { child: Child }
+
+struct CollectorProcess(Mutex<Option<CollectorChild>>);
+
+#[cfg(windows)]
+impl CollectorChild {
+    fn new(mut child: Child) -> Result<Self, String> {
+        use std::{mem::size_of, os::windows::io::AsRawHandle, ptr::null};
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, HANDLE},
+            System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE},
+        };
+        unsafe {
+            let job=CreateJobObjectW(null(),null());
+            if job.is_null(){let _=child.kill();return Err(format!("collector job creation failed: {}",std::io::Error::last_os_error()));}
+            let mut info=JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(job,JobObjectExtendedLimitInformation,&info as *const _ as *const _,size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32)==0 {
+                let error=std::io::Error::last_os_error();let _=child.kill();CloseHandle(job);return Err(format!("collector job configuration failed: {error}"));
+            }
+            if AssignProcessToJobObject(job,child.as_raw_handle() as HANDLE)==0 {
+                let error=std::io::Error::last_os_error();let _=child.kill();CloseHandle(job);return Err(format!("collector job assignment failed: {error}"));
+            }
+            Ok(Self{child,job:job as isize})
+        }
+    }
+    fn terminate(&mut self){
+        use windows_sys::Win32::{Foundation::{CloseHandle,HANDLE},System::JobObjects::TerminateJobObject};
+        unsafe { if self.job!=0 { TerminateJobObject(self.job as HANDLE,1); CloseHandle(self.job as HANDLE); self.job=0; } }
+        let _=self.child.wait();
+    }
+}
+
+#[cfg(not(windows))]
+impl CollectorChild {
+    fn new(child:Child)->Result<Self,String>{Ok(Self{child})}
+    fn terminate(&mut self){let _=self.child.kill();let _=self.child.wait();}
+}
+
+impl Drop for CollectorChild { fn drop(&mut self){self.terminate();} }
+
+fn terminate_collector(process:&CollectorProcess){
+    if let Ok(mut guard)=process.0.lock(){if let Some(mut owned)=guard.take(){owned.terminate();}}
+}
+
+#[cfg(all(test,windows))]
+mod process_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn job_termination_cleans_node_process_tree(){
+        use windows_sys::Win32::{Foundation::CloseHandle,System::Threading::{OpenProcess,WaitForSingleObject}};
+        let node=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("runtime").join("node.exe");
+        let script="setTimeout(()=>{const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)']);console.log(c.pid)},500);setInterval(()=>{},1000)";
+        let mut child=Command::new(node).args(["-e",script]).stdout(Stdio::piped()).spawn().expect("spawn root node");
+        let stdout=child.stdout.take().expect("root stdout");
+        let mut owned=CollectorChild::new(child).expect("assign job");
+        let mut line=String::new();
+        BufReader::new(stdout).read_line(&mut line).expect("read descendant pid");
+        let descendant_pid:u32=line.trim().parse().expect("descendant pid");
+        let descendant=unsafe{OpenProcess(0x00100000,0,descendant_pid)};
+        assert!(!descendant.is_null(),"descendant must be running before cleanup");
+        owned.terminate();
+        assert_eq!(unsafe{WaitForSingleObject(descendant,5_000)},0,"descendant must exit with the owned job");
+        unsafe{CloseHandle(descendant)};
+    }
+}
 
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("data");
@@ -153,9 +225,10 @@ fn search_companies(app: AppHandle, query: Option<String>, page: Option<i64>, ta
 #[tauri::command]
 fn open_collector(app: AppHandle, state: State<CollectorProcess>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|_| "collector lock poisoned".to_string())?;
-    if let Some(child) = guard.as_mut() {
-        if child.try_wait().map_err(|e| e.to_string())?.is_none() { return Ok(()); }
+    if let Some(owned) = guard.as_mut() {
+        if owned.child.try_wait().map_err(|e| e.to_string())?.is_none() { return Ok(()); }
     }
+    guard.take();
     let runtime = app.path().resource_dir().map_err(|e| e.to_string())?.join("runtime");
     let mut command = Command::new(runtime.join("node.exe"));
     command.arg("collector.mjs").current_dir(&runtime).env("NODE_ENV", "production")
@@ -175,14 +248,14 @@ fn open_collector(app: AppHandle, state: State<CollectorProcess>) -> Result<(), 
             if !line.contains("ExperimentalWarning") { let _ = handle.emit("collector-event", serde_json::json!({"type":"error","code":"COLLECTOR_RUNTIME_ERROR","message":line})); }
         });
     }
-    *guard = Some(child);
+    *guard = Some(CollectorChild::new(child)?);
     Ok(())
 }
 
-fn send_control(state: State<CollectorProcess>, command: &str) -> Result<(), String> {
+fn send_control(state: &CollectorProcess, command: &str) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|_| "collector lock poisoned".to_string())?;
-    let child = guard.as_mut().ok_or("collector is not running")?;
-    let input = child.stdin.as_mut().ok_or("collector input unavailable")?;
+    let owned = guard.as_mut().ok_or("collector is not running")?;
+    let input = owned.child.stdin.as_mut().ok_or("collector input unavailable")?;
     writeln!(input, "{command}").map_err(|e| e.to_string())?;
     input.flush().map_err(|e| e.to_string())
 }
@@ -215,24 +288,42 @@ fn start_collection(state: State<CollectorProcess>, target: Option<String>) -> R
         "target": target.unwrap_or_else(|| "액체 펌프 제조업".to_string()),
         "credential": credential.map(|(username, password)| serde_json::json!({"username":username,"password":password}))
     });
-    send_control(state, &command.to_string())
+    send_control(state.inner(), &command.to_string())
 }
 #[tauri::command]
 fn login_sminfo(state: State<CollectorProcess>) -> Result<(), String> {
     let credential = credentials::read()?.ok_or("SMINFO 계정 등록이 필요합니다.")?;
-    send_control(state, &serde_json::json!({"command":"login","credential":{"username":credential.0,"password":credential.1}}).to_string())
+    send_control(state.inner(), &serde_json::json!({"command":"login","credential":{"username":credential.0,"password":credential.1}}).to_string())
 }
-#[tauri::command] fn pause_collection(state: State<CollectorProcess>) -> Result<(), String> { send_control(state, "pause") }
-#[tauri::command] fn resume_collection(state: State<CollectorProcess>) -> Result<(), String> { send_control(state, "resume") }
-#[tauri::command] fn stop_collection(state: State<CollectorProcess>) -> Result<(), String> { send_control(state, "stop") }
-#[tauri::command] fn run_navigation_test(state: State<CollectorProcess>) -> Result<(), String> { send_control(state, "nav_test") }
+#[tauri::command] fn pause_collection(state: State<CollectorProcess>) -> Result<(), String> { send_control(state.inner(), "pause") }
+#[tauri::command] fn resume_collection(state: State<CollectorProcess>) -> Result<(), String> { send_control(state.inner(), "resume") }
+#[tauri::command]
+fn stop_collection(state: State<CollectorProcess>) -> Result<(), String> {
+    send_control(state.inner(), "shutdown")?;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let exited={
+            let mut guard=state.0.lock().map_err(|_|"collector lock poisoned".to_string())?;
+            match guard.as_mut(){Some(owned)=>owned.child.try_wait().map_err(|e|e.to_string())?.is_some(),None=>true}
+        };
+        if exited { break; }
+    }
+    terminate_collector(state.inner());
+    Ok(())
+}
+#[tauri::command] fn run_navigation_test(state: State<CollectorProcess>) -> Result<(), String> { send_control(state.inner(), "nav_test") }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app=tauri::Builder::default()
         .manage(CollectorProcess(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![initialize_database, search_companies, get_company_detail, list_collector_targets, credential_status, save_sminfo_credential, delete_sminfo_credential, open_collector, login_sminfo, start_collection, pause_collection, resume_collection, stop_collection, run_navigation_test])
         .setup(|app| { connection(&app.handle()).map_err(std::io::Error::other)?; Ok(()) })
-        .run(tauri::generate_context!())
-        .expect("error while running MONA RADAR");
+        .build(tauri::generate_context!())
+        .expect("error while building MONA RADAR");
+    app.run(|handle,event|{
+        if matches!(event,tauri::RunEvent::ExitRequested { .. }|tauri::RunEvent::Exit){
+            terminate_collector(handle.state::<CollectorProcess>().inner());
+        }
+    });
 }
