@@ -16,6 +16,8 @@ interface CompanyRow {
 interface SearchResponse { rows: CompanyRow[]; total: number; page: number; totalPages: number; }
 interface CredentialStatus { saved: boolean; username?: string; }
 interface TargetOption { targetId: string; name: string; }
+interface IndustryCodeOption { industryCode:string; industryName:string; classificationLevel?:string; }
+interface IndustryMasterStatus { count:number; lastRefreshedAt?:string; status:string; }
 interface CompanyFullDetail { company: CompanyRow & { lastCollectedAt?:string }; financialStatements:Array<Record<string,unknown>>; businessSites:Array<Record<string,unknown>>; histories:Array<Record<string,unknown>>; executives:Array<Record<string,unknown>>; certifications:Array<Record<string,unknown>>; designations:Array<Record<string,unknown>>; factories:Array<Record<string,unknown>>; patents:Array<Record<string,unknown>>; }
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -33,6 +35,12 @@ let credential: CredentialStatus = { saved: false };
 let loggedIn = false;
 let editingCredential = false;
 let collectorTarget = "액체 펌프 제조업";
+let selectedIndustry:IndustryCodeOption|undefined;
+let industryOptions:IndustryCodeOption[]=[];
+let industryStatus:IndustryMasterStatus={count:0,status:"IDLE"};
+let industryRefreshRunning=false;
+let industrySearchTimer:number|undefined;
+let industrySearchSequence=0;
 let targetOptions: TargetOption[] = [];
 let searchTargetId = "";
 let selectedCompany: CompanyFullDetail | undefined;
@@ -92,22 +100,26 @@ const accountPanel = () => credential.saved && !editingCredential ? `
   <div class="account-panel"><div><b>SMINFO Account</b><span>ID: <strong>${escapeHtml(credential.username ?? "")}</strong></span><span>Password: <strong class="good">● Windows에 저장됨</strong></span><span>Login: <strong class="${loggedIn ? "good" : "muted"}">${loggedIn ? "● Logged in" : "○ 시작 시 자동 확인"}</strong></span></div><div class="account-actions"><button data-action="edit_account">계정 변경</button><button data-action="delete_account">저장정보 삭제</button></div></div>` : `
   <div class="account-panel account-form"><div><b>SMINFO Account</b><span>저장된 비밀번호는 보안상 다시 표시하지 않습니다. 계정 변경 시 새 비밀번호를 입력하세요.</span></div><label>ID<input id="sminfo-id" autocomplete="username" value="${escapeHtml(credential.username ?? "")}"></label><label>Password<input id="sminfo-password" type="password" autocomplete="current-password"></label><div class="account-actions"><button class="primary" data-action="save_account">계정 저장</button>${credential.saved ? '<button data-action="cancel_account">취소</button>' : ""}</div></div>`;
 
+const industryOptionsHtml=()=>industryOptions.length?`<div class="industry-options">${industryOptions.map(item=>`<button type="button" data-industry-code="${escapeHtml(item.industryCode)}"><b>${escapeHtml(item.industryName)}</b><span>${escapeHtml(item.industryCode)}${item.classificationLevel?` · ${escapeHtml(item.classificationLevel)}`:""}</span></button>`).join("")}</div>`:"";
+const industrySelectionHtml=()=>selectedIndustry?`<small class="selected-industry">선택됨: ${escapeHtml(selectedIndustry.industryName)} (${escapeHtml(selectedIndustry.industryCode)})</small>`:industryStatus.count?'<small>검색 결과에서 산업을 선택해야 수집을 시작할 수 있습니다.</small>':'<small>산업코드 데이터가 없습니다. 먼저 산업코드를 갱신하세요.</small>';
+const industryTargetPanel=()=>`<div class="target-panel industry-target"><div class="industry-picker"><label><b>Collector Target</b><input id="collector-target" value="${escapeHtml(collectorTarget)}" autocomplete="off" placeholder="산업명 또는 산업코드 검색"></label><div id="industry-options-host">${industryOptionsHtml()}</div><div id="industry-selection-host">${industrySelectionHtml()}</div></div><div class="industry-master-actions"><button type="button" data-action="refresh_industries" ${industryRefreshRunning||!credential.saved?"disabled":""}>${industryRefreshRunning?"갱신 중…":"산업코드 갱신"}</button><small>${industryStatus.count.toLocaleString()}개 · ${industryStatus.lastRefreshedAt?new Date(industryStatus.lastRefreshedAt).toLocaleString():"갱신 기록 없음"}</small></div></div>`;
+
 const collector = () => `
   <section class="page">
     <header><p class="eyebrow">LOCAL COLLECTION ENGINE</p><h2>Collector</h2><p>SMINFO 화면의 실제 기업·목록·페이지 버튼을 이용해 상세정보를 저장합니다.</p></header>
     ${accountPanel()}
-    <div class="target-panel"><label><b>Collector Target</b><input id="collector-target" value="${escapeHtml(collectorTarget)}" autocomplete="off"></label><small>수집 시작을 누르면 로그인 확인부터 기업 수집까지 자동으로 진행합니다.</small></div>
+    ${industryTargetPanel()}
     ${status === "TARGET_NOT_FOUND" ? '<div class="target-error"><b>Target이 잘못되었습니다.</b><span>Collector Target을 바꾸고 다시 수집 시작을 눌러주세요.</span></div>' : ""}
     <div class="guide"><b>자동 순서</b><span>1. 세션 확인</span><span>2. 필요 시 자동 로그인</span><span>3. Target 업종 검색</span><span>4. 기업 수집</span></div>
     <div class="status-grid">
       <article><span>브라우저</span><strong>${status === "IDLE" ? "닫힘" : "실행 중"}</strong><small>로그인 프로필 유지</small></article>
       <article><span>SMINFO 상태</span><strong>${status}</strong><small>${status === "READY" ? "수집 가능" : "브라우저 상태를 확인하세요"}</small></article>
       <article><span>현재 기업</span><strong>${escapeHtml(currentCompany)}</strong><small>저장 완료 기업</small></article>
-      <article><span>다음 조회</span><strong id="countdown-value">${countdown}</strong><small>60–90초 간격</small></article>
+      <article><span>다음 조회</span><strong id="countdown-value">${countdown}</strong><small>35–40초 간격</small></article>
     </div>
     <div class="workspace">
       <div class="actions">
-        <button class="primary" data-action="start" ${!credential.saved || editingCredential || ["BROWSER_STARTING", "WAITING_FOR_BROWSER", "RUNNING", "COLLECTING", "PAUSED", "LOGIN_IN_PROGRESS", "LOGIN_CHECKING", "INDUSTRY_SEARCHING", "COMPANY_SEARCHING", "RECOVERING", "LOGIN_FAILED", "CREDENTIAL_REQUIRED"].includes(status) ? "disabled" : ""}>수집 시작</button>
+        <button class="primary" data-action="start" ${!selectedIndustry || !credential.saved || editingCredential || ["BROWSER_STARTING", "WAITING_FOR_BROWSER", "RUNNING", "COLLECTING", "PAUSED", "LOGIN_IN_PROGRESS", "LOGIN_CHECKING", "INDUSTRY_SEARCHING", "COMPANY_SEARCHING", "RECOVERING", "LOGIN_FAILED", "CREDENTIAL_REQUIRED"].includes(status) ? "disabled" : ""}>수집 시작</button>
         <button data-action="pause" ${status !== "RUNNING" ? "disabled" : ""}>일시정지</button>
         <button data-action="resume" ${status !== "PAUSED" ? "disabled" : ""}>재개</button>
         <button data-action="stop" ${status === "IDLE" ? "disabled" : ""}>중단</button>
@@ -221,7 +233,13 @@ function render() {
     render();
     if (view === "search") void loadSearch(1);
   }));
-  document.querySelector<HTMLInputElement>("#collector-target")?.addEventListener("input", (event) => { collectorTarget = (event.target as HTMLInputElement).value; });
+  const bindIndustryOptions=()=>document.querySelectorAll<HTMLButtonElement>("[data-industry-code]").forEach(button=>button.addEventListener("click",()=>{const item=industryOptions.find(value=>value.industryCode===button.dataset.industryCode);if(!item)return;selectedIndustry=item;collectorTarget=item.industryName;localStorage.setItem("mona-selected-industry",JSON.stringify(item));industryOptions=[];render()}));
+  const updateIndustryResults=()=>{const host=document.querySelector<HTMLElement>("#industry-options-host");if(host)host.innerHTML=industryOptionsHtml();const selected=document.querySelector<HTMLElement>("#industry-selection-host");if(selected)selected.innerHTML=industrySelectionHtml();const start=document.querySelector<HTMLButtonElement>("[data-action=start]");if(start&&!selectedIndustry)start.disabled=true;bindIndustryOptions()};
+  const performIndustrySearch=(value:string)=>{collectorTarget=value;selectedIndustry=undefined;localStorage.removeItem("mona-selected-industry");if(industrySearchTimer)window.clearTimeout(industrySearchTimer);const sequence=++industrySearchSequence;industrySearchTimer=window.setTimeout(async()=>{try{const rows=await invoke<IndustryCodeOption[]>("search_industry_codes",{query:value});if(sequence!==industrySearchSequence)return;industryOptions=rows;if(view==="collector")updateIndustryResults()}catch(error){logs.push(`ERROR ${String(error)}`)}},120)};
+  const targetInput=document.querySelector<HTMLInputElement>("#collector-target");
+  if(targetInput){let composing=false;targetInput.addEventListener("compositionstart",()=>{composing=true});targetInput.addEventListener("compositionupdate",()=>{composing=true;queueMicrotask(()=>performIndustrySearch(targetInput.value))});targetInput.addEventListener("compositionend",()=>{composing=false;queueMicrotask(()=>performIndustrySearch(targetInput.value))});targetInput.addEventListener("input",event=>{if(composing||(event as InputEvent).isComposing){queueMicrotask(()=>performIndustrySearch(targetInput.value));return}performIndustrySearch(targetInput.value)})}
+  bindIndustryOptions();
+  document.querySelector<HTMLButtonElement>("[data-action=refresh_industries]")?.addEventListener("click",async()=>{try{industryRefreshRunning=true;render();await invoke("refresh_industry_master")}catch(error){industryRefreshRunning=false;logs.push(`ERROR ${String(error)}`);render()}});
   document.querySelector<HTMLButtonElement>("[data-action=copy_logs]")?.addEventListener("click",()=>void copyLogs());
   document.querySelector<HTMLElement>("[data-action=edit_account]")?.addEventListener("click", () => { editingCredential = true; render(); });
   document.querySelector<HTMLElement>("[data-action=cancel_account]")?.addEventListener("click", () => {
@@ -271,7 +289,7 @@ function render() {
        }
        try {
          if(action === "start") await invoke("open_collector");
-         await invoke(command, action === "start" ? { target: collectorTarget.trim() || "액체 펌프 제조업" } : undefined);
+         await invoke(command, action === "start" ? { target: selectedIndustry!.industryName, industryCode:selectedIndustry!.industryCode } : undefined);
        } catch (error) { logs.push(`ERROR ${String(error)}`); }
       render();
     });
@@ -292,6 +310,9 @@ setupWindowChrome();
 render();
 void invoke<CredentialStatus>("credential_status").then((value) => { credential = value; if (!value.saved) editingCredential = true; if (view === "collector") render(); }).catch((error) => logs.push(`ERROR ${String(error)}`));
 void invoke<TargetOption[]>("list_collector_targets").then((value)=>{targetOptions=value;if(view==="search")render();}).catch(()=>undefined);
+void invoke<IndustryMasterStatus>("industry_master_status").then(value=>{industryStatus=value;if(view==="collector")render()}).catch(()=>undefined);
+try{const saved=localStorage.getItem("mona-selected-industry");if(saved){const value=JSON.parse(saved) as IndustryCodeOption;void invoke<IndustryCodeOption[]>("search_industry_codes",{query:value.industryCode}).then(rows=>{const valid=rows.find(row=>row.industryCode===value.industryCode);if(valid){selectedIndustry=valid;collectorTarget=valid.industryName}else localStorage.removeItem("mona-selected-industry");if(view==="collector")render()})}}catch{localStorage.removeItem("mona-selected-industry")}
+void listen<Record<string,unknown>>("industry-event",event=>{const data=event.payload;industryRefreshRunning=String(data.status)==="RUNNING";logs.push(`${new Date().toLocaleTimeString()} industry ${String(data.message??data.status??"")}`);if(String(data.status)==="COMPLETED")void invoke<IndustryMasterStatus>("industry_master_status").then(value=>{industryStatus=value;industryOptions=[];if(view==="collector")render()});else if(view==="collector")renderPreservingScroll()});
 void listen<Record<string, unknown>>("collector-event", (event) => {
   const data = event.payload;
   if (data.type === "status") { status = String(data.status) as CollectorStatus; if(status === "LOGIN_FAILED" || status === "CREDENTIAL_REQUIRED") { editingCredential=true; loggedIn=false; } }

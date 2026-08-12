@@ -95,7 +95,7 @@ export async function collectCurrentSearch(
           const detail = parseCompanyDetail(html);
           if (!detail.kcd) detail.kcd = item.sminfo_kcd;
           if (!detail.companyName) detail.companyName = item.company_name_snapshot;
-          emit({type:"detail_parsed",companyName:detail.companyName,message:`Detail parsed: financials=${detail.financialStatements.length}, sites=${detail.businessSites?.length??0}, histories=${detail.histories?.length??0}, executives=${detail.executives?.length??0}, certifications=${detail.certifications?.length??0}, designations=${detail.designations?.length??0}, factories=${detail.factories?.length??0}`});
+          emit({type:"detail_parsed",companyName:detail.companyName,message:`Detail parsed: quality=${detail.collectionQuality}, sections=${Object.entries(detail.sectionStatuses).map(([name,result])=>`${name}:${result.status}`).join(",")}, financials=${detail.financialStatements.length}, sites=${detail.businessSites?.length??0}, histories=${detail.histories?.length??0}, executives=${detail.executives?.length??0}, certifications=${detail.certifications?.length??0}, designations=${detail.designations?.length??0}, factories=${detail.factories?.length??0}`});
           repo.saveCompany(item.collection_item_id, detail);
           if (targetId) repo.linkCollectedCompany(targetId, item.collection_item_id, detail.ksicCode);
           processed++;
@@ -112,10 +112,13 @@ export async function collectCurrentSearch(
           await clickListAndRestore(page, pageNumber);
 
           const delay = nextDelayMs();
-          for (let seconds = Math.ceil(delay / 1000); seconds > 0; seconds--) {
+          let remainingDelay = delay;
+          while (remainingDelay > 0) {
             await control.checkpoint();
-            emit({ type: "countdown", seconds });
-            await wait(1000);
+            emit({ type: "countdown", seconds: Math.ceil(remainingDelay / 1000) });
+            const step = Math.min(1000, remainingDelay);
+            await wait(step);
+            remainingDelay -= step;
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -139,11 +142,12 @@ export async function collectCurrentSearch(
         }
       }
     }
-    repo.jobStatus(job, "COMPLETED");
-    if (targetId) repo.targetStatus(targetId, "COMPLETED");
-    emit({ type: "status", status: "COMPLETED", message: "Collection completed" });
+    const result=repo.finishJob(job);
+    if (targetId) repo.targetStatus(targetId, result.status);
+    emit({ type: "status", status: result.status, message: result.status === "COMPLETED" ? "Collection completed" : `Collection completed with ${result.failed} failure(s)` });
   } catch (error) {
     repo.jobStatus(job, "ERROR");
+    if (targetId) repo.targetStatus(targetId, "ERROR");
     throw error;
   }
 }

@@ -7,6 +7,7 @@ let context: BrowserContext;
 let searchPage: Page;
 
 beforeAll(async () => {
+  if (!process.env.RUN_BROWSER_TESTS) return;
   browser = await chromium.launch({ channel: "msedge", headless: true, chromiumSandbox: true });
   context = await browser.newContext();
 
@@ -67,13 +68,13 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  await searchPage.close();
-  await context.close();
-  await browser.close();
+  await searchPage?.close();
+  await context?.close();
+  await browser?.close();
 }, 30_000);
 
 describe("A-J single-page navigation diagnostic", () => {
-  it("uses only visible company, list, and pagination UI", async () => {
+  it.skipIf(!process.env.RUN_BROWSER_TESTS)("uses only visible company, list, and pagination UI", async () => {
     const events: string[] = [];
     await runNavigationTest(searchPage, (event) => {
       const value = event as { message?: string };

@@ -8,7 +8,11 @@ export interface BusinessSiteInfo { siteName?: string; siteType?: string; busine
 export interface CompanyHistoryInfo { eventDate?: string; description?: string; }
 export interface CertificationInfo { certificationName?: string; certificationNumber?: string; issuer?: string; acquiredDate?: string; validUntil?: string; }
 export interface DesignationInfo { designationName?: string; designationNumber?: string; authority?: string; designatedDate?: string; validUntil?: string; }
-export interface CompanyDetail extends CompanySourceSummary { businessNumber?: string; companyStatus?: string; establishedDate?: string; address?: string; homepage?: string; mainProducts?: string; ksicCode?: string; financialStatements: FinancialStatement[]; factories?: FactoryInfo[]; patents?: PatentInfo[]; executives?: ExecutiveInfo[]; businessSites?: BusinessSiteInfo[]; histories?: CompanyHistoryInfo[]; certifications?: CertificationInfo[]; designations?: DesignationInfo[]; }
+export type SectionStatus = "NOT_CHECKED" | "VERIFIED" | "CONFIRMED_EMPTY" | "PARTIAL" | "FAILED";
+export type CollectionQuality = "UNKNOWN" | "PARTIAL" | "VERIFIED" | "FAILED";
+export type DetailSectionName = "basic_info" | "financial" | "factory" | "patent" | "executive" | "business_site" | "history" | "certification" | "designation";
+export interface SectionCollectionResult { status: SectionStatus; error?: string; }
+export interface CompanyDetail extends CompanySourceSummary { businessNumber?: string; companyStatus?: string; establishedDate?: string; address?: string; homepage?: string; mainProducts?: string; ksicCode?: string; financialStatements: FinancialStatement[]; factories?: FactoryInfo[]; patents?: PatentInfo[]; executives?: ExecutiveInfo[]; businessSites?: BusinessSiteInfo[]; histories?: CompanyHistoryInfo[]; certifications?: CertificationInfo[]; designations?: DesignationInfo[]; sectionStatuses: Record<DetailSectionName,SectionCollectionResult>; collectionQuality: CollectionQuality; }
 export interface CollectionJob { id: string; status: CollectorStatus; total: number; completed: number; failed: number; pending: number; }
 export interface CollectionItem { kcd: string; status: "PENDING" | "RUNNING" | "DONE" | "FAILED" | "SKIPPED"; errorCode?: string; errorMessage?: string; }
 export type CollectorEvent =

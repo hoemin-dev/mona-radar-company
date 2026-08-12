@@ -15,6 +15,8 @@ use std::os::windows::process::CommandExt;
 const MIGRATION_001: &str = include_str!("../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../migrations/002_collector_automation.sql");
 const MIGRATION_003: &str = include_str!("../migrations/003_company_detail_sections.sql");
+const MIGRATION_004: &str = include_str!("../migrations/004_collection_quality.sql");
+const MIGRATION_005: &str = include_str!("../migrations/005_industry_master.sql");
 #[cfg(windows)]
 struct CollectorChild {
     child: Child,
@@ -25,6 +27,7 @@ struct CollectorChild {
 struct CollectorChild { child: Child }
 
 struct CollectorProcess(Mutex<Option<CollectorChild>>);
+struct IndustryProcess(Mutex<Option<CollectorChild>>);
 
 #[cfg(windows)]
 impl CollectorChild {
@@ -66,6 +69,9 @@ impl Drop for CollectorChild { fn drop(&mut self){self.terminate();} }
 fn terminate_collector(process:&CollectorProcess){
     if let Ok(mut guard)=process.0.lock(){if let Some(mut owned)=guard.take(){owned.terminate();}}
 }
+fn terminate_industry(process:&IndustryProcess){
+    if let Ok(mut guard)=process.0.lock(){if let Some(mut owned)=guard.take(){owned.terminate();}}
+}
 
 #[cfg(all(test,windows))]
 mod process_lifecycle_tests {
@@ -103,6 +109,8 @@ fn connection(app: &AppHandle) -> Result<Connection, String> {
     conn.execute_batch(MIGRATION_001).map_err(|e| e.to_string())?;
     conn.execute_batch(MIGRATION_002).map_err(|e| e.to_string())?;
     conn.execute_batch(MIGRATION_003).map_err(|e| e.to_string())?;
+    conn.execute_batch(MIGRATION_004).map_err(|e| e.to_string())?;
+    conn.execute_batch(MIGRATION_005).map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -142,6 +150,29 @@ struct SearchResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TargetOption { target_id: String, name: String }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndustryCodeOption { industry_code:String, industry_name:String, classification_level:Option<String> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndustryMasterStatus { count:i64, last_refreshed_at:Option<String>, status:String }
+
+#[tauri::command]
+fn search_industry_codes(app:AppHandle,query:Option<String>)->Result<Vec<IndustryCodeOption>,String>{
+    let conn=connection(&app)?;let pattern=format!("%{}%",query.unwrap_or_default().trim());
+    let mut stmt=conn.prepare("SELECT industry_code,industry_name,classification_level FROM industry_codes WHERE is_active=1 AND (?1='%%' OR industry_name LIKE ?1 OR industry_code LIKE ?1) ORDER BY industry_name COLLATE NOCASE LIMIT 30").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([pattern],|r|Ok(IndustryCodeOption{industry_code:r.get(0)?,industry_name:r.get(1)?,classification_level:r.get(2)?})).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(rows)
+}
+
+#[tauri::command]
+fn industry_master_status(app:AppHandle)->Result<IndustryMasterStatus,String>{
+    let conn=connection(&app)?;let count=conn.query_row("SELECT COUNT(*) FROM industry_codes WHERE is_active=1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let last=conn.query_row("SELECT completed_at FROM industry_master_refreshes WHERE status='COMPLETED' ORDER BY completed_at DESC LIMIT 1",[],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    Ok(IndustryMasterStatus{count,last_refreshed_at:last,status:"IDLE".into()})
+}
 
 fn json_rows<F>(conn:&Connection,sql:&str,company_id:&str,mut mapper:F)->Result<Vec<serde_json::Value>,String>
 where F:FnMut(&Row<'_>)->rusqlite::Result<serde_json::Value>{
@@ -252,6 +283,23 @@ fn open_collector(app: AppHandle, state: State<CollectorProcess>) -> Result<(), 
     Ok(())
 }
 
+#[tauri::command]
+fn refresh_industry_master(app:AppHandle,state:State<IndustryProcess>)->Result<(),String>{
+    let credential=credentials::read()?.ok_or("SMINFO 계정 등록이 필요합니다.")?;
+    let mut guard=state.0.lock().map_err(|_|"industry lock poisoned".to_string())?;
+    if let Some(owned)=guard.as_mut(){if owned.child.try_wait().map_err(|e|e.to_string())?.is_none(){return Err("산업코드 갱신이 이미 실행 중입니다.".into())}}
+    guard.take();
+    let runtime=app.path().resource_dir().map_err(|e|e.to_string())?.join("runtime");
+    let mut command=Command::new(runtime.join("node.exe"));
+    command.arg("collector.mjs").arg("--industry-refresh").current_dir(&runtime).env("NODE_ENV","production").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)] command.creation_flags(0x08000000);
+    let mut child=command.spawn().map_err(|e|format!("industry refresh start failed: {e}"))?;
+    if let Some(mut stdin)=child.stdin.take(){let payload=serde_json::json!({"username":credential.0,"password":credential.1}).to_string();stdin.write_all(payload.as_bytes()).map_err(|e|e.to_string())?;}
+    if let Some(stdout)=child.stdout.take(){let handle=app.clone();std::thread::spawn(move||for line in BufReader::new(stdout).lines().map_while(Result::ok){if let Ok(value)=serde_json::from_str::<serde_json::Value>(&line){let _=handle.emit("industry-event",value);}});}
+    if let Some(stderr)=child.stderr.take(){let handle=app.clone();std::thread::spawn(move||for line in BufReader::new(stderr).lines().map_while(Result::ok){if !line.contains("ExperimentalWarning"){let _=handle.emit("industry-event",serde_json::json!({"type":"industry_refresh_status","status":"FAILED","message":line}));}});}
+    *guard=Some(CollectorChild::new(child)?);Ok(())
+}
+
 fn send_control(state: &CollectorProcess, command: &str) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|_| "collector lock poisoned".to_string())?;
     let owned = guard.as_mut().ok_or("collector is not running")?;
@@ -281,11 +329,12 @@ fn delete_sminfo_credential() -> Result<credentials::CredentialStatus, String> {
 }
 
 #[tauri::command]
-fn start_collection(state: State<CollectorProcess>, target: Option<String>) -> Result<(), String> {
+fn start_collection(state: State<CollectorProcess>, target: Option<String>, industry_code:Option<String>) -> Result<(), String> {
     let credential = credentials::read()?;
     let command = serde_json::json!({
         "command": "start",
         "target": target.unwrap_or_else(|| "액체 펌프 제조업".to_string()),
+        "industryCode": industry_code,
         "credential": credential.map(|(username, password)| serde_json::json!({"username":username,"password":password}))
     });
     send_control(state.inner(), &command.to_string())
@@ -317,13 +366,15 @@ fn stop_collection(state: State<CollectorProcess>) -> Result<(), String> {
 pub fn run() {
     let app=tauri::Builder::default()
         .manage(CollectorProcess(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![initialize_database, search_companies, get_company_detail, list_collector_targets, credential_status, save_sminfo_credential, delete_sminfo_credential, open_collector, login_sminfo, start_collection, pause_collection, resume_collection, stop_collection, run_navigation_test])
+        .manage(IndustryProcess(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![initialize_database, search_companies, get_company_detail, list_collector_targets, search_industry_codes, industry_master_status, refresh_industry_master, credential_status, save_sminfo_credential, delete_sminfo_credential, open_collector, login_sminfo, start_collection, pause_collection, resume_collection, stop_collection, run_navigation_test])
         .setup(|app| { connection(&app.handle()).map_err(std::io::Error::other)?; Ok(()) })
         .build(tauri::generate_context!())
         .expect("error while building MONA RADAR");
     app.run(|handle,event|{
         if matches!(event,tauri::RunEvent::ExitRequested { .. }|tauri::RunEvent::Exit){
             terminate_collector(handle.state::<CollectorProcess>().inner());
+            terminate_industry(handle.state::<IndustryProcess>().inner());
         }
     });
 }

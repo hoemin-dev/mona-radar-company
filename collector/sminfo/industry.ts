@@ -49,7 +49,7 @@ async function choose(row:Locator,page:Page) {
   if(confirmCount) await confirm.click();
 }
 
-export async function resolveIndustry(page:Page,target:string,emit:(event:unknown)=>void):Promise<IndustryCandidate>{
+export async function resolveIndustry(page:Page,target:string,emit:(event:unknown)=>void,preferredCode?:string):Promise<IndustryCandidate>{
   const before=new Set(page.context().pages());
   const popupPromise=page.waitForEvent("popup",{timeout:3_000}).catch(()=>undefined);
   await page.getByText("산업코드찾기",{exact:true}).filter({visible:true}).first().click();
@@ -63,8 +63,9 @@ export async function resolveIndustry(page:Page,target:string,emit:(event:unknow
   const candidates=await readCandidates(lookup,target);
   emit({type:"industry_candidates",target,candidates:candidates.map(x=>x.candidate),message:`Industry candidates found: ${candidates.length}`});
   if(!candidates.length) throw new Error(`TARGET_NOT_FOUND target=${target}`);
+  const byCode=preferredCode?candidates.filter(x=>normalized(x.candidate.code??"")===normalized(preferredCode)):[];
   const exact=candidates.filter(x=>normalized(x.candidate.name)===normalized(target));
-  const selectable=exact.length===1?exact:candidates.length===1?candidates:[];
+  const selectable=byCode.length===1?byCode:exact.length===1?exact:candidates.length===1?candidates:[];
   if(selectable.length!==1) throw new Error(`INDUSTRY_SELECTION_REQUIRED candidates=${JSON.stringify(candidates.map(x=>x.candidate))}`);
   const closePromise=lookup!==page?lookup.waitForEvent("close",{timeout:10_000}).catch(()=>undefined):undefined;
   await choose(selectable[0]!.row,lookup);

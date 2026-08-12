@@ -2,7 +2,7 @@ import { createInterface, type Interface } from "node:readline";
 import type { Readable } from "node:stream";
 
 export type CollectorAction = "start" | "login" | "nav_test" | "shutdown";
-export interface StartRequest { target: string; credential?: { username: string; password: string } }
+export interface StartRequest { target: string; industryCode?:string; credential?: { username: string; password: string } }
 export interface QueuedCollectorAction { action: CollectorAction; request?: StartRequest }
 type StateEmitter = (status: "RUNNING" | "PAUSED" | "STOPPED", message: string) => void;
 
@@ -23,10 +23,10 @@ export class CollectorControl {
       let request: StartRequest | undefined;
       if (line.trim().startsWith("{")) {
         try {
-          const parsed = JSON.parse(line) as { command?: string; target?: string; credential?: StartRequest["credential"] };
+          const parsed = JSON.parse(line) as { command?: string; target?: string; industryCode?:string; credential?: StartRequest["credential"] };
           command = parsed.command?.toLowerCase() ?? "";
           if (command === "start" || command === "login") {
-            request = { target: parsed.target?.trim() || this.lastTarget, credential: parsed.credential };
+            request = { target: parsed.target?.trim() || this.lastTarget, industryCode:parsed.industryCode, credential: parsed.credential };
             if (command === "start") this.lastTarget = request.target;
           }
         } catch { return; }

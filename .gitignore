@@ -27,5 +27,6 @@ src-tauri/target-*/
 *.tmp
 Thumbs.db
 
-# Codex / Cargo temporary build target
+# Codex / Cargo temporary build targets
 .codex-cargo-target/
+.cargo-target-check/
