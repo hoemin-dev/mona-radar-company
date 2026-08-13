@@ -4,6 +4,31 @@ import { SMINFO_SELECTORS } from "./selectors.js";
 
 export type LoginFailure = "INVALID_CREDENTIAL" | "LOGIN_DOM_CHANGED" | "NETWORK_ERROR" | "LOGIN_RESULT_UNKNOWN";
 type EventEmitter = (event: unknown) => void;
+export type SessionStatus = "LOGGED_IN"|"LOGGED_OUT"|"EXPIRED"|"UNKNOWN";
+
+export interface BrowserState {
+  sessionStatus:SessionStatus;
+  url:string;
+  path:string;
+  loginForm:boolean;
+  searchResults:boolean;
+  detailPage:boolean;
+}
+
+export async function inspectBrowserState(page:Page):Promise<BrowserState>{
+  const url=page.url();
+  let path="";try{path=new URL(url).pathname}catch{}
+  const loginId=await page.locator(SMINFO_SELECTORS.login.id).filter({visible:true}).count().catch(()=>0);
+  const loginPassword=await page.locator(SMINFO_SELECTORS.login.password).filter({visible:true}).count().catch(()=>0);
+  const loginSubmit=await page.locator(SMINFO_SELECTORS.login.submit).filter({visible:true}).count().catch(()=>0);
+  const loginForm=loginId>0&&loginPassword>0&&loginSubmit>0;
+  const searchResults=await page.locator(SMINFO_SELECTORS.company.resultLink).filter({visible:true}).count().then(n=>n>0).catch(()=>false);
+  const detailPage=path===SMINFO.detailPath;
+  const sessionStatus:SessionStatus=loginForm||path===SMINFO.loginPath
+    ?(url!=="about:blank"?"EXPIRED":"LOGGED_OUT")
+    :(path===SMINFO.searchPath||detailPage?"LOGGED_IN":"UNKNOWN");
+  return {sessionStatus,url,path,loginForm,searchResults,detailPage};
+}
 
 export async function isLoggedIn(page: Page) {
   let navigationError: unknown;
@@ -52,6 +77,8 @@ export async function openCompanySearch(page: Page) {
 }
 
 export async function ensureLoggedIn(page: Page, credential?: { username: string; password: string }, emit:EventEmitter=()=>undefined) {
+  const current=await inspectBrowserState(page);
+  if(current.sessionStatus==="LOGGED_IN")return "SESSION_REUSED" as const;
   if (await isLoggedIn(page)) return "SESSION_REUSED" as const;
   if (!credential) throw new Error("CREDENTIAL_REQUIRED");
   emit({type:"status",status:"LOGIN_IN_PROGRESS",message:"Opening the SMINFO login page"});

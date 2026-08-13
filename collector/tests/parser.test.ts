@@ -31,13 +31,11 @@ describe("SMINFO semantic parsers", () => {
       expect.objectContaining({ fiscalYear: 2025, totalAssets: 6092, revenue: 4728, operatingIncome: 238, netIncome: 43 }),
       expect.objectContaining({ fiscalYear: 2024, totalAssets: 5865, revenue: 5106 }),
     ]);
-    expect(result.factories).toEqual([{ factoryName: "제1공장", locationAddress: "경기도 안산시" }]);
-    expect(result.patents).toEqual([{ patentDate: "2025-01-01", description: "고효율 펌프" }]);
+    expect(result.businessSites).toContainEqual({ siteName: "제1공장", siteAddress: "경기도 안산시" });
     expect(result.executives).toEqual([{ positionTitle: "대표이사", maskedName: "홍**" }]);
-    expect(result.businessSites).toEqual([{ siteName: "본사", siteType: "본점", businessNumber: "123-45-67890", address: "경기도 안산시" }]);
     expect(result.histories).toEqual([{ eventDate: "2024-03", description: "신공장 준공" }]);
-    expect(result.certifications).toEqual([{ certificationName: "ISO 9001", certificationNumber: "ISO-001", issuer: "KAB", acquiredDate: "2024-01-01", validUntil: "2027-01-01" }]);
-    expect(result.designations).toEqual([{ designationName: "벤처기업", designationNumber: "V-001", authority: "중소벤처기업부", designatedDate: "2025-01-01", validUntil: undefined }]);
+    expect(result.certifications).toEqual([{ certificationName: "ISO 9001", certificationNumber: "ISO-001", certificationScope: undefined, validityPeriod: "2027-01-01", certificationAuthority: "KAB" }]);
+    expect(result.designations).toEqual([{ designationName: "벤처기업", designationNumber: "V-001", validityPeriod: undefined, operatingAuthority: "중소벤처기업부" }]);
   });
 
   it("reads legacy td-only tables from captured detail sections",()=>{
@@ -61,9 +59,9 @@ describe("SMINFO semantic parsers", () => {
       <table><tr><th colspan="3">경영진</th></tr><tr><td>번호</td><td>직위</td><td>성명</td></tr><tr><td>1</td><td>대표이사</td><td>홍**</td></tr></table>
       <table><tr><th colspan="7">매출현황</th></tr><tr><td>결산년도</td><td>총자산</td><td>자본금</td><td>자본총계</td><td>매출액</td><td>영업이익</td><td>당기순이익</td></tr><tr><td>2024-12-31</td><td>10,000</td><td>500</td><td>8,000</td><td>7,000</td><td>600</td><td>400</td></tr></table>
     </body></html>`);
-    expect(result.businessSites).toEqual([{siteName:"본사",siteType:"본사",address:"광주광역시"}]);
-    expect(result.histories).toEqual([{eventDate:"2022-03",description:"법인 설립"}]);
-    expect(result.executives).toEqual([{positionTitle:"대표이사",maskedName:"홍**"}]);
+    expect(result.businessSites).toEqual([{siteName:"본사",siteAddress:"광주광역시"}]);
+    expect(result.histories).toEqual([{sourceNumber:"1",eventDate:"2022-03",description:"법인 설립"}]);
+    expect(result.executives).toEqual([{sourceNumber:"1",positionTitle:"대표이사",maskedName:"홍**"}]);
     expect(result.financialStatements).toEqual([expect.objectContaining({fiscalYear:2024,totalAssets:10000,revenue:7000,operatingIncome:600,netIncome:400})]);
   });
 
@@ -73,6 +71,31 @@ describe("SMINFO semantic parsers", () => {
       <h3>경영진</h3><table><thead><tr><th>번호</th><th>직위</th><th>성명</th></tr></thead><tbody><tr><td>1</td><td>대표이사</td><td>홍**</td></tr></tbody></table>
     </body></html>`);
     expect(result.financialStatements).toEqual([expect.objectContaining({fiscalYear:2024,totalAssets:10000,revenue:7000,operatingIncome:600,netIncome:400})]);
-    expect(result.executives).toEqual([{positionTitle:"대표이사",maskedName:"홍**"}]);
+    expect(result.executives).toEqual([{sourceNumber:"1",positionTitle:"대표이사",maskedName:"홍**"}]);
+  });
+
+  it("treats explicit empty business-site evidence as confirmed empty",()=>{
+    const result=parseCompanyDetail(`<h3>사업장정보</h3><p>등록된 정보가 없습니다.</p>`);
+    expect(result.businessSites).toEqual([]);
+    expect(result.sectionStatuses.business_site.status).toBe("CONFIRMED_EMPTY");
+  });
+
+  it("pairs one or multiple vertical business-site entries in source order",()=>{
+    const one=parseCompanyDetail(`<table><tr><th>공장명</th><td>본사</td></tr><tr><th>사업장소재지</th><td>서울</td></tr></table>`);
+    expect(one.businessSites).toEqual([{siteName:"본사",siteAddress:"서울"}]);
+    const many=parseCompanyDetail(`<table><tr><th>공장명</th><td>1공장</td></tr><tr><th>사업장소재지</th><td>서울</td></tr><tr><th>공장명</th><td>2공장</td></tr><tr><th>사업장소재지</th><td>부산</td></tr></table>`);
+    expect(many.businessSites).toEqual([{siteName:"1공장",siteAddress:"서울"},{siteName:"2공장",siteAddress:"부산"}]);
+  });
+
+  it("does not save an incomplete business-site pair as an empty section",()=>{
+    const result=parseCompanyDetail(`<h3>사업장정보</h3><table><tr><th>공장명</th><td>본사</td></tr></table>`);
+    expect(result.businessSites).toEqual([]);
+    expect(result.sectionStatuses.business_site.status).toBe("PARTIAL");
+  });
+
+  it("keeps certification and designation validity periods as raw strings",()=>{
+    const result=parseCompanyDetail(`<table><tr><th>인증명</th><th>인증번호</th><th>인증범위</th><th>유효기간</th><th>인증기관</th></tr><tr><td>ISO</td><td>C-1</td><td>펌프</td><td>2024.01.01 ~ 2027.01.01</td><td>KAB</td></tr></table><table><tr><th>지정명</th><th>지정번호</th><th>유효기간</th><th>운영기관</th></tr><tr><td>벤처기업</td><td>D-1</td><td>2025년부터 계속</td><td>중기부</td></tr></table>`);
+    expect(result.certifications[0]?.validityPeriod).toBe("2024.01.01 ~ 2027.01.01");
+    expect(result.designations[0]?.validityPeriod).toBe("2025년부터 계속");
   });
 });

@@ -6,9 +6,7 @@ import type {
   CertificationInfo,
   DesignationInfo,
   ExecutiveInfo,
-  FactoryInfo,
   FinancialStatement,
-  PatentInfo,
   DetailSectionName,
   SectionCollectionResult,
 } from "../../src/shared/types.js";
@@ -26,6 +24,7 @@ const labels = {
   homepage: ["\uD648\uD398\uC774\uC9C0", "\uD648\uD398\uC774\uC9C0URL"],
   mainProducts: ["\uC8FC\uC0DD\uC0B0\uD488", "\uC8FC\uC694\uC81C\uD488", "\uC8FC\uC694\uC0DD\uC0B0\uD488"],
   industryName: ["\uD45C\uC900\uC0B0\uC5C5", "\uC0B0\uC5C5\uBA85", "\uC8FC\uC5C5\uC885"],
+  sourceUpdatedAt: ["\uC815\uBCF4\uC218\uC815\uC77C\uC790"],
 } as const;
 
 const input = ($: CheerioAPI, ...names: string[]) => {
@@ -60,8 +59,6 @@ const yearValue=(value:string)=>{
 export function parseCompanyDetail(html: string): CompanyDetail {
   const $ = load(html);
   const financialStatements: FinancialStatement[] = [];
-  const factories: FactoryInfo[] = [];
-  const patents: PatentInfo[] = [];
   const executives: ExecutiveInfo[] = [];
   const businessSites: BusinessSiteInfo[] = [];
   const histories: CompanyHistoryInfo[] = [];
@@ -128,16 +125,12 @@ export function parseCompanyDetail(html: string): CompanyDetail {
 
     const factoryNameAt = headerIndex(headers, ["\uACF5\uC7A5\uBA85"]);
     const factoryAddressAt = headerIndex(headers, ["\uC0AC\uC5C5\uC7A5\uC18C\uC7AC\uC9C0", "\uC18C\uC7AC\uC9C0", "\uACF5\uC7A5\uC8FC\uC18C"]);
-    const isBusinessSiteTable=headers.some(header=>header.replace(/\s/g,"").includes("사업장소재지"));
     if (factoryNameAt >= 0 || factoryAddressAt >= 0) {
-      recognized.add("factory");
-      if(isBusinessSiteTable)recognized.add("business_site");
+      recognized.add("business_site");
       rows.each((__, row) => {
         const cells = $(row).find("td").map((___, cell) => clean($(cell).text())).get();
-        if (cells.length) {
-          factories.push({ factoryName: cells[factoryNameAt], locationAddress: cells[factoryAddressAt] });
-          if(isBusinessSiteTable) businessSites.push({siteName:cells[factoryNameAt],siteType:cells[factoryNameAt],address:cells[factoryAddressAt]});
-        }
+        const siteName=cells[factoryNameAt],siteAddress=cells[factoryAddressAt];
+        if (siteName&&siteAddress) businessSites.push({siteName,siteAddress});
       });
       return;
     }
@@ -146,18 +139,7 @@ export function parseCompanyDetail(html: string): CompanyDetail {
     const siteAddressAt = headerIndex(headers, ["사업장주소", "소재지", "주소"]);
     if (siteNameAt >= 0 || (sectionText.includes("사업장") && siteAddressAt >= 0)) {
       recognized.add("business_site");
-      rows.each((__, row) => { const cells=cellsFor(row); if(cells.some(Boolean)) businessSites.push({siteName:cells[siteNameAt],siteType:textAt(cells,["사업장구분","구분","사업장유형"]),businessNumber:textAt(cells,["사업자번호","사업자등록번호"]),address:cells[siteAddressAt]}); });
-      return;
-    }
-
-    const patentAt = headerIndex(headers, ["\uD2B9\uD5C8\uBA85", "\uBC1C\uBA85\uC758\uBA85\uCE6D", "\uB0B4\uC6A9"]);
-    const patentDateAt = headerIndex(headers, ["\uCD9C\uC6D0\uC77C", "\uB4F1\uB85D\uC77C", "\uD2B9\uD5C8\uC77C\uC790"]);
-    if (patentAt >= 0 && headers.some((header) => header.includes("\uD2B9\uD5C8") || header.includes("\uBC1C\uBA85"))) {
-      recognized.add("patent");
-      rows.each((__, row) => {
-        const cells = $(row).find("td").map((___, cell) => clean($(cell).text())).get();
-        if (cells.length) patents.push({ patentDate: cells[patentDateAt], description: cells[patentAt] });
-      });
+      rows.each((__, row) => { const cells=cellsFor(row); const siteName=cells[siteNameAt],siteAddress=cells[siteAddressAt];if(siteName&&siteAddress) businessSites.push({siteName,siteAddress}); });
       return;
     }
 
@@ -167,7 +149,7 @@ export function parseCompanyDetail(html: string): CompanyDetail {
       recognized.add("executive");
       rows.each((__, row) => {
         const cells = $(row).find("td").map((___, cell) => clean($(cell).text())).get();
-        if (cells.length) executives.push({ positionTitle: cells[positionAt], maskedName: cells[executiveAt] });
+        if (cells.length) executives.push({ sourceNumber:textAt(cells,["\uBC88\uD638"]),positionTitle: cells[positionAt], maskedName: cells[executiveAt] });
       });
       return;
     }
@@ -176,21 +158,34 @@ export function parseCompanyDetail(html: string): CompanyDetail {
     const descriptionAt=headerIndex(headers,["연혁내용","주요내용","내용","연혁"]);
     if((sectionText.includes("연혁") || headers.some(x=>x.includes("연혁"))) && descriptionAt>=0){
       recognized.add("history");
-      rows.each((__,row)=>{const cells=cellsFor(row);if(cells.some(Boolean))histories.push({eventDate:cells[eventDateAt],description:cells[descriptionAt]});});
+      rows.each((__,row)=>{const cells=cellsFor(row);if(cells.some(Boolean))histories.push({sourceNumber:textAt(cells,["\uBC88\uD638"]),eventDate:cells[eventDateAt],description:cells[descriptionAt]});});
       return;
     }
 
     const certNameAt=headerIndex(headers,["인증명","인증종류","인증구분"]);
     if(sectionText.includes("인증") || certNameAt>=0){
       recognized.add("certification");
-      rows.each((__,row)=>{const cells=cellsFor(row);if(cells.some(Boolean))certifications.push({certificationName:cells[certNameAt],certificationNumber:textAt(cells,["인증번호","등록번호"]),issuer:textAt(cells,["인증기관","발급기관","기관명"]),acquiredDate:textAt(cells,["인증일","취득일","발급일"]),validUntil:textAt(cells,["유효기간","만료일"])});});
+      rows.each((__,row)=>{const cells=cellsFor(row);if(cells.some(Boolean))certifications.push({certificationNumber:textAt(cells,["\uC778\uC99D\uBC88\uD638"]),certificationName:cells[certNameAt],certificationScope:textAt(cells,["\uC778\uC99D\uBC94\uC704"]),validityPeriod:textAt(cells,["\uC720\uD6A8\uAE30\uAC04","\uC720\uD6A8\uAE30\uD55C","\uB9CC\uB8CC\uC77C","\uC874\uC18D\uAE30\uAC04"]),certificationAuthority:textAt(cells,["\uC778\uC99D\uAE30\uAD00","\uBC1C\uAE09\uAE30\uAD00"])});});
       return;
     }
 
     const designationNameAt=headerIndex(headers,["지정명","지정종류","지정구분"]);
     if(sectionText.includes("지정") || designationNameAt>=0){
       recognized.add("designation");
-      rows.each((__,row)=>{const cells=cellsFor(row);if(cells.some(Boolean))designations.push({designationName:cells[designationNameAt],designationNumber:textAt(cells,["지정번호","등록번호"]),authority:textAt(cells,["지정기관","주관기관","기관명"]),designatedDate:textAt(cells,["지정일","등록일"]),validUntil:textAt(cells,["유효기간","만료일"])});});
+      rows.each((__,row)=>{const cells=cellsFor(row);if(cells.some(Boolean))designations.push({designationNumber:textAt(cells,["\uC9C0\uC815\uBC88\uD638"]),designationName:cells[designationNameAt],validityPeriod:textAt(cells,["\uC720\uD6A8\uAE30\uAC04","\uC720\uD6A8\uAE30\uD55C","\uC874\uC18D\uAE30\uAC04"]),operatingAuthority:textAt(cells,["\uC6B4\uC601\uAE30\uAD00","\uC8FC\uAD00\uAE30\uAD00","\uC9C0\uC815\uAE30\uAD00"])});});
+    }
+  });
+
+  // Some SMINFO pages render business sites as repeating label/value rows
+  // instead of one conventional header table. Pair each 공장명 with the next
+  // 사업장소재지 and preserve the source order.
+  let pendingSiteName:string|undefined;
+  $("tr").each((_,row)=>{
+    const cells=$(row).find("th,td").map((__,cell)=>clean($(cell).text())).get();
+    for(let index=0;index<cells.length;index++){
+      const label=(cells[index]??"").replace(/\s/g,"");const value=cells[index+1];
+      if(label.includes("\uACF5\uC7A5\uBA85")&&value){pendingSiteName=value;recognized.add("business_site");index++;continue;}
+      if(label.includes("\uC0AC\uC5C5\uC7A5\uC18C\uC7AC\uC9C0")&&value){recognized.add("business_site");if(pendingSiteName)businessSites.push({siteName:pendingSiteName,siteAddress:value});pendingSiteName=undefined;index++;}
     }
   });
 
@@ -208,9 +203,8 @@ export function parseCompanyDetail(html: string): CompanyDetail {
     mainProducts: valueByLabel($, labels.mainProducts),
     ksicCode: input($, "ksic11BzcCd", "ksicCd"),
     industryName: input($, "ksic11BzcCdNm", "ksicNm") ?? valueByLabel($, labels.industryName),
+    sourceUpdatedAt:valueByLabel($,labels.sourceUpdatedAt),
     financialStatements:unique(financialStatements),
-    factories:unique(factories),
-    patents:unique(patents),
     executives:unique(executives),
     businessSites:unique(businessSites),
     histories:unique(histories),
@@ -219,14 +213,14 @@ export function parseCompanyDetail(html: string): CompanyDetail {
   };
   const normalizedText=clean($("body").text()).replace(/\s/g,"");
   const headingNames:Record<Exclude<DetailSectionName,"basic_info">,string[]>={
-    financial:["매출현황","재무현황","재무정보"],factory:["공장","공장정보"],patent:["특허","특허정보"],executive:["경영진","임원현황"],business_site:["사업장정보","사업장현황"],history:["연혁","주요연혁"],certification:["인증","인증현황"],designation:["지정","지정현황"],
+    financial:["매출현황","재무현황","재무정보"],executive:["경영진","임원현황"],business_site:["사업장정보","사업장현황"],history:["연혁","주요연혁"],certification:["인증","인증현황"],designation:["지정","지정현황"],
   };
   const hasHeading=(section:Exclude<DetailSectionName,"basic_info">)=>headingNames[section].some(name=>normalizedText.includes(name));
   const hasEmptyEvidence=(section:Exclude<DetailSectionName,"basic_info">)=>headingNames[section].some(name=>new RegExp(`${name}.{0,80}(?:정보가없|내역이없|등록된.{0,10}없|조회된.{0,10}없)`).test(normalizedText));
   const listStatus=(section:Exclude<DetailSectionName,"basic_info"|"financial">,count:number):SectionCollectionResult=>{
     if(count>0)return {status:"VERIFIED"};
-    if(recognized.has(section)||hasEmptyEvidence(section))return {status:"CONFIRMED_EMPTY"};
-    if(hasHeading(section))return {status:"PARTIAL",error:"SECTION_PRESENT_BUT_TABLE_NOT_RECOGNIZED"};
+    if(hasEmptyEvidence(section))return {status:"CONFIRMED_EMPTY"};
+    if(recognized.has(section)||hasHeading(section))return {status:"PARTIAL",error:"SECTION_PRESENT_WITHOUT_COMPLETE_ROWS"};
     return {status:"NOT_CHECKED",error:"SECTION_NOT_FOUND"};
   };
   const hasBasicIdentity=Boolean(parsed.companyName);
@@ -234,15 +228,12 @@ export function parseCompanyDetail(html: string): CompanyDetail {
   const financialHasValue=parsed.financialStatements.some(row=>row.totalAssets!==undefined||row.equity!==undefined||row.totalCapital!==undefined||row.revenue!==undefined||row.operatingIncome!==undefined||row.netIncome!==undefined);
   let financialStatus:SectionCollectionResult;
   if(parsed.financialStatements.length&&financialHasValue)financialStatus={status:"VERIFIED"};
-  else if(recognized.has("financial")&&!parsed.financialStatements.length)financialStatus={status:"CONFIRMED_EMPTY"};
   else if(hasEmptyEvidence("financial"))financialStatus={status:"CONFIRMED_EMPTY"};
   else if(recognized.has("financial")||hasHeading("financial"))financialStatus={status:"PARTIAL",error:"FINANCIAL_TABLE_OR_VALUES_NOT_FULLY_PARSED"};
   else financialStatus={status:"NOT_CHECKED",error:"FINANCIAL_SECTION_NOT_FOUND"};
   const sectionStatuses:Record<DetailSectionName,SectionCollectionResult>={
     basic_info:hasBasicIdentity&&hasBasicFields?{status:"VERIFIED"}:{status:"PARTIAL",error:"BASIC_INFO_INCOMPLETE"},
     financial:financialStatus,
-    factory:listStatus("factory",parsed.factories.length),
-    patent:listStatus("patent",parsed.patents.length),
     executive:listStatus("executive",parsed.executives.length),
     business_site:listStatus("business_site",parsed.businessSites.length),
     history:listStatus("history",parsed.histories.length),

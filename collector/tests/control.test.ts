@@ -44,6 +44,17 @@ describe("Collector control state transitions", () => {
     control.dispose();
   });
 
+  it("increments resume generation so active collection resets recovery state",async()=>{
+    const input=new PassThrough();const control=new CollectorControl(()=>undefined,input);control.beginCollection();control.pauseForRecovery();const before=control.currentResumeGeneration();input.write("resume\n");await tick();expect(control.currentResumeGeneration()).toBe(before+1);control.dispose();
+  });
+
+  it("preserves target, industry code and credential on inactive recovery resume",async()=>{
+    const input=new PassThrough();const control=new CollectorControl(()=>undefined,input);
+    input.write('{"command":"start","target":"액체 펌프 제조업","industryCode":"C29131","credential":{"username":"user","password":"secret"}}\n');
+    const first=await control.waitForAction();expect(first.action).toBe("start");control.beginCollection();control.pauseForRecovery();control.endCollection();
+    const resumed=control.waitForAction();input.write("resume\n");await expect(resumed).resolves.toMatchObject({action:"start",request:{target:"액체 펌프 제조업",industryCode:"C29131",credential:{username:"user",password:"secret"}}});control.dispose();
+  });
+
   it("allows Start after Stop without restarting the program", async () => {
     const input = new PassThrough();
     const events: string[] = [];

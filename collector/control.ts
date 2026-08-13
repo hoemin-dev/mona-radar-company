@@ -14,6 +14,9 @@ export class CollectorControl {
   private actionResolve: ((action: QueuedCollectorAction) => void) | undefined;
   private pendingActions: QueuedCollectorAction[] = [];
   private lastTarget = "액체 펌프 제조업";
+  private lastIndustryCode:string|undefined;
+  private lastCredential:StartRequest["credential"];
+  private resumeGeneration=0;
   shutdownRequested = false;
 
   constructor(onState: StateEmitter = () => undefined, input: Readable = process.stdin) {
@@ -25,9 +28,9 @@ export class CollectorControl {
         try {
           const parsed = JSON.parse(line) as { command?: string; target?: string; industryCode?:string; credential?: StartRequest["credential"] };
           command = parsed.command?.toLowerCase() ?? "";
-          if (command === "start" || command === "login") {
+          if (command === "start" || command === "login" || command === "resume") {
             request = { target: parsed.target?.trim() || this.lastTarget, industryCode:parsed.industryCode, credential: parsed.credential };
-            if (command === "start") this.lastTarget = request.target;
+            if (command === "start" || command === "resume") {this.lastTarget=request.target;this.lastIndustryCode=request.industryCode??this.lastIndustryCode;this.lastCredential=request.credential??this.lastCredential;}
           }
         } catch { return; }
       }
@@ -69,8 +72,9 @@ export class CollectorControl {
         }
         this.paused = false;
         this.stopped = false;
-        onState("RUNNING", this.active ? "Collection resumed" : "Recovery collection restarted");
-        if (!this.active) this.dispatch("start", { target: this.lastTarget });
+        this.resumeGeneration++;
+        onState("RUNNING", this.active ? "Resume requested; validating browser state" : "Resume requested; recovery collection restarting");
+        if (!this.active) this.dispatch("start", request??{ target: this.lastTarget,industryCode:this.lastIndustryCode,credential:this.lastCredential });
         return;
       }
       if (command === "stop") {
@@ -114,6 +118,8 @@ export class CollectorControl {
   pauseForRecovery() {
     this.paused = true;
   }
+
+  currentResumeGeneration(){return this.resumeGeneration}
 
   async checkpoint() {
     while (this.paused && !this.stopped) await new Promise((resolve) => setTimeout(resolve, 250));

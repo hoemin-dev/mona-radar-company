@@ -8,6 +8,7 @@ pub const TARGET: &str = "MonaRadar.Company/SMINFO";
 pub struct CredentialStatus {
     pub saved: bool,
     pub username: Option<String>,
+    pub credential_status: String,
 }
 
 #[cfg(windows)]

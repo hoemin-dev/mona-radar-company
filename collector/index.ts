@@ -6,6 +6,7 @@ import migration2 from "../src-tauri/migrations/002_collector_automation.sql";
 import migration3 from "../src-tauri/migrations/003_company_detail_sections.sql";
 import migration4 from "../src-tauri/migrations/004_collection_quality.sql";
 import migration5 from "../src-tauri/migrations/005_industry_master.sql";
+import migration6 from "../src-tauri/migrations/006_source_detail_model.sql";
 import { openPersistentSminfo } from "./browser/prototype.js";
 import { runNavigationTest } from "./browser/navigation-test.js";
 import { collectCurrentSearch } from "./collector.js";
@@ -23,7 +24,7 @@ fs.mkdirSync(dataDir, { recursive: true });
 
 if(process.argv.includes("--industry-refresh")){
   const dbFile=path.join(dataDir,"mona-radar-company.sqlite3");
-  const repo=new Repository(dbFile,`${migration}\n${migration2}\n${migration3}\n${migration4}\n${migration5}`);repo.close();
+  const repo=new Repository(dbFile,`${migration}\n${migration2}\n${migration3}\n${migration4}\n${migration5}\n${migration6}`);repo.close();
   const credential=JSON.parse(fs.readFileSync(0,"utf8")) as {username:string;password:string};
   const industryProfile=path.join(appData,"com.monaradar.company","industry-browser-profile");
   try{await refreshIndustryMaster(industryProfile,dbFile,credential,emit)}catch(error){emit({type:"industry_refresh_status",status:"FAILED",message:error instanceof Error?error.message:String(error)});process.exitCode=1}
@@ -67,18 +68,19 @@ while (true) {
 
   const request = queued.request ?? { target: "액체 펌프 제조업" };
   control.beginCollection();
-  const repo = new Repository(path.join(dataDir, "mona-radar-company.sqlite3"), `${migration}\n${migration2}\n${migration3}\n${migration4}\n${migration5}`);
+  const repo = new Repository(path.join(dataDir, "mona-radar-company.sqlite3"), `${migration}\n${migration2}\n${migration3}\n${migration4}\n${migration5}\n${migration6}`);
   try {
     emit({ type: "status", status: "LOGIN_CHECKING", message: "Checking SMINFO login session" });
-    const loginMode = await ensureLoggedIn(page, request.credential, emit);
+    const activeCredential=request.credential;
+    const loginMode = await ensureLoggedIn(page, activeCredential, emit);
     request.credential = undefined;
-    emit({ type: "login_status", loggedIn: true, message: loginMode === "SESSION_REUSED" ? "Existing SMINFO session reused" : "SMINFO automatic login succeeded" });
+    emit({ type: "login_status", loggedIn: true,sessionStatus:"LOGGED_IN", message: loginMode === "SESSION_REUSED" ? "Existing SMINFO session reused" : "SMINFO automatic login succeeded" });
     emit({ type: "status", status: "INDUSTRY_SEARCHING", message: `Searching SMINFO industry: ${request.target}` });
     const industry = await resolveIndustry(page, request.target, emit, request.industryCode);
     emit({ type: "status", status: "COMPANY_SEARCHING", message: `Searching companies: ${industry.name}` });
     await runCompanySearch(page, industry, emit);
     const targetId = repo.upsertTarget(request.target, industry.code, industry.name);
-    await collectCurrentSearch(page, repo, emit, undefined, control, targetId);
+    await collectCurrentSearch(page, repo, emit, undefined, control, targetId,{credential:activeCredential,target:request.target,industry});
   } catch (error) {
     const message=error instanceof Error ? error.message : String(error);
     const credentialRequired=message.includes("CREDENTIAL_REQUIRED");

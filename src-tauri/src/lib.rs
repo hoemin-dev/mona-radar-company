@@ -17,6 +17,7 @@ const MIGRATION_002: &str = include_str!("../migrations/002_collector_automation
 const MIGRATION_003: &str = include_str!("../migrations/003_company_detail_sections.sql");
 const MIGRATION_004: &str = include_str!("../migrations/004_collection_quality.sql");
 const MIGRATION_005: &str = include_str!("../migrations/005_industry_master.sql");
+const MIGRATION_006: &str = include_str!("../migrations/006_source_detail_model.sql");
 #[cfg(windows)]
 struct CollectorChild {
     child: Child,
@@ -111,6 +112,7 @@ fn connection(app: &AppHandle) -> Result<Connection, String> {
     conn.execute_batch(MIGRATION_003).map_err(|e| e.to_string())?;
     conn.execute_batch(MIGRATION_004).map_err(|e| e.to_string())?;
     conn.execute_batch(MIGRATION_005).map_err(|e| e.to_string())?;
+    conn.execute_batch(MIGRATION_006).map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -184,18 +186,16 @@ where F:FnMut(&Row<'_>)->rusqlite::Result<serde_json::Value>{
 #[tauri::command]
 fn get_company_detail(app:AppHandle,company_id:String)->Result<serde_json::Value,String>{
     let conn=connection(&app)?;
-    let company=conn.query_row("SELECT company_id,sminfo_kcd,business_number,company_name,representative_name,company_type,company_status,established_date,address,road_address,homepage_url,main_products,ksic_code,industry_name,last_collected_at FROM companies WHERE company_id=?",params![&company_id],|r|Ok(serde_json::json!({
-      "companyId":r.get::<_,String>(0)?,"sminfoKcd":r.get::<_,String>(1)?,"businessNumber":r.get::<_,Option<String>>(2)?,"companyName":r.get::<_,String>(3)?,"representativeName":r.get::<_,Option<String>>(4)?,"companyType":r.get::<_,Option<String>>(5)?,"companyStatus":r.get::<_,Option<String>>(6)?,"establishedDate":r.get::<_,Option<String>>(7)?,"address":r.get::<_,Option<String>>(8)?,"roadAddress":r.get::<_,Option<String>>(9)?,"homepageUrl":r.get::<_,Option<String>>(10)?,"mainProducts":r.get::<_,Option<String>>(11)?,"ksicCode":r.get::<_,Option<String>>(12)?,"industryName":r.get::<_,Option<String>>(13)?,"lastCollectedAt":r.get::<_,String>(14)?
+    let company=conn.query_row("SELECT company_id,sminfo_kcd,business_number,company_name,representative_name,company_type,company_status,established_date,address,road_address,homepage_url,main_products,ksic_code,industry_name,last_collected_at,source_updated_at FROM companies WHERE company_id=?",params![&company_id],|r|Ok(serde_json::json!({
+      "companyId":r.get::<_,String>(0)?,"sminfoKcd":r.get::<_,String>(1)?,"businessNumber":r.get::<_,Option<String>>(2)?,"companyName":r.get::<_,String>(3)?,"representativeName":r.get::<_,Option<String>>(4)?,"companyType":r.get::<_,Option<String>>(5)?,"companyStatus":r.get::<_,Option<String>>(6)?,"establishedDate":r.get::<_,Option<String>>(7)?,"address":r.get::<_,Option<String>>(8)?,"roadAddress":r.get::<_,Option<String>>(9)?,"homepageUrl":r.get::<_,Option<String>>(10)?,"mainProducts":r.get::<_,Option<String>>(11)?,"ksicCode":r.get::<_,Option<String>>(12)?,"industryName":r.get::<_,Option<String>>(13)?,"lastCollectedAt":r.get::<_,String>(14)?,"sourceUpdatedAt":r.get::<_,Option<String>>(15)?
     }))).optional().map_err(|e|e.to_string())?.ok_or("기업을 찾을 수 없습니다.")?;
     let financials=json_rows(&conn,"SELECT fiscal_year,total_assets_krw_million,paid_in_capital_krw_million,total_equity_krw_million,revenue_krw_million,operating_income_krw_million,net_income_krw_million FROM company_financial_statements WHERE company_id=? ORDER BY fiscal_year DESC",&company_id,|r|Ok(serde_json::json!({"fiscalYear":r.get::<_,i64>(0)?,"totalAssets":r.get::<_,Option<i64>>(1)?,"paidInCapital":r.get::<_,Option<i64>>(2)?,"totalEquity":r.get::<_,Option<i64>>(3)?,"revenue":r.get::<_,Option<i64>>(4)?,"operatingIncome":r.get::<_,Option<i64>>(5)?,"netIncome":r.get::<_,Option<i64>>(6)?})))?;
-    let sites=json_rows(&conn,"SELECT site_name,site_type,business_number,address FROM company_business_sites WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"siteName":r.get::<_,Option<String>>(0)?,"siteType":r.get::<_,Option<String>>(1)?,"businessNumber":r.get::<_,Option<String>>(2)?,"address":r.get::<_,Option<String>>(3)?})))?;
-    let histories=json_rows(&conn,"SELECT event_date,description FROM company_histories WHERE company_id=? ORDER BY event_date DESC,source_ordinal",&company_id,|r|Ok(serde_json::json!({"eventDate":r.get::<_,Option<String>>(0)?,"description":r.get::<_,Option<String>>(1)?})))?;
-    let executives=json_rows(&conn,"SELECT position_title,masked_name FROM company_executives WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"positionTitle":r.get::<_,Option<String>>(0)?,"maskedName":r.get::<_,Option<String>>(1)?})))?;
-    let certifications=json_rows(&conn,"SELECT certification_name,certification_number,issuer,acquired_date,valid_until FROM company_certifications WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"certificationName":r.get::<_,Option<String>>(0)?,"certificationNumber":r.get::<_,Option<String>>(1)?,"issuer":r.get::<_,Option<String>>(2)?,"acquiredDate":r.get::<_,Option<String>>(3)?,"validUntil":r.get::<_,Option<String>>(4)?})))?;
-    let designations=json_rows(&conn,"SELECT designation_name,designation_number,authority,designated_date,valid_until FROM company_designations WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"designationName":r.get::<_,Option<String>>(0)?,"designationNumber":r.get::<_,Option<String>>(1)?,"authority":r.get::<_,Option<String>>(2)?,"designatedDate":r.get::<_,Option<String>>(3)?,"validUntil":r.get::<_,Option<String>>(4)?})))?;
-    let factories=json_rows(&conn,"SELECT factory_name,location_address FROM company_factories WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"factoryName":r.get::<_,Option<String>>(0)?,"locationAddress":r.get::<_,Option<String>>(1)?})))?;
-    let patents=json_rows(&conn,"SELECT patent_date,description FROM company_patents WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"patentDate":r.get::<_,Option<String>>(0)?,"description":r.get::<_,Option<String>>(1)?})))?;
-    Ok(serde_json::json!({"company":company,"financialStatements":financials,"businessSites":sites,"histories":histories,"executives":executives,"certifications":certifications,"designations":designations,"factories":factories,"patents":patents}))
+    let sites=json_rows(&conn,"SELECT site_name,site_address FROM company_source_business_sites WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"siteName":r.get::<_,Option<String>>(0)?,"siteAddress":r.get::<_,Option<String>>(1)?})))?;
+    let histories=json_rows(&conn,"SELECT source_number,event_date,description FROM company_source_histories WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"sourceNumber":r.get::<_,Option<String>>(0)?,"eventDate":r.get::<_,Option<String>>(1)?,"description":r.get::<_,Option<String>>(2)?})))?;
+    let executives=json_rows(&conn,"SELECT source_number,position_title,masked_name FROM company_source_executives WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"sourceNumber":r.get::<_,Option<String>>(0)?,"positionTitle":r.get::<_,Option<String>>(1)?,"maskedName":r.get::<_,Option<String>>(2)?})))?;
+    let certifications=json_rows(&conn,"SELECT certification_number,certification_name,certification_scope,validity_period,certification_authority FROM company_source_certifications WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"certificationNumber":r.get::<_,Option<String>>(0)?,"certificationName":r.get::<_,Option<String>>(1)?,"certificationScope":r.get::<_,Option<String>>(2)?,"validityPeriod":r.get::<_,Option<String>>(3)?,"certificationAuthority":r.get::<_,Option<String>>(4)?})))?;
+    let designations=json_rows(&conn,"SELECT designation_number,designation_name,validity_period,operating_authority FROM company_source_designations WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"designationNumber":r.get::<_,Option<String>>(0)?,"designationName":r.get::<_,Option<String>>(1)?,"validityPeriod":r.get::<_,Option<String>>(2)?,"operatingAuthority":r.get::<_,Option<String>>(3)?})))?;
+    Ok(serde_json::json!({"company":company,"financialStatements":financials,"businessSites":sites,"histories":histories,"executives":executives,"certifications":certifications,"designations":designations}))
 }
 
 #[tauri::command]
@@ -310,8 +310,10 @@ fn send_control(state: &CollectorProcess, command: &str) -> Result<(), String> {
 
 #[tauri::command]
 fn credential_status() -> Result<credentials::CredentialStatus, String> {
-    let value = credentials::read()?;
-    Ok(credentials::CredentialStatus { saved: value.is_some(), username: value.map(|x| x.0) })
+    match credentials::read(){
+      Ok(value)=>{let saved=value.is_some();Ok(credentials::CredentialStatus { saved, username: value.map(|x| x.0),credential_status:if saved{"SAVED".into()}else{"MISSING".into()} })},
+      Err(error)=>Ok(credentials::CredentialStatus{saved:false,username:None,credential_status:format!("READ_ERROR: {error}")})
+    }
 }
 
 #[tauri::command]
@@ -319,13 +321,13 @@ fn save_sminfo_credential(username: String, password: String) -> Result<credenti
     credentials::save(&username, &password)?;
     let verified=credentials::read()?.is_some_and(|(saved_user,saved_password)|saved_user==username.trim()&&saved_password==password);
     if !verified { let _=credentials::delete(); return Err("Windows Credential Manager 저장 왕복 검증에 실패했습니다.".into()); }
-    Ok(credentials::CredentialStatus { saved: true, username: Some(username.trim().to_string()) })
+    Ok(credentials::CredentialStatus { saved: true, username: Some(username.trim().to_string()),credential_status:"SAVED".into() })
 }
 
 #[tauri::command]
 fn delete_sminfo_credential() -> Result<credentials::CredentialStatus, String> {
     credentials::delete()?;
-    Ok(credentials::CredentialStatus { saved: false, username: None })
+    Ok(credentials::CredentialStatus { saved: false, username: None,credential_status:"MISSING".into() })
 }
 
 #[tauri::command]
@@ -345,7 +347,10 @@ fn login_sminfo(state: State<CollectorProcess>) -> Result<(), String> {
     send_control(state.inner(), &serde_json::json!({"command":"login","credential":{"username":credential.0,"password":credential.1}}).to_string())
 }
 #[tauri::command] fn pause_collection(state: State<CollectorProcess>) -> Result<(), String> { send_control(state.inner(), "pause") }
-#[tauri::command] fn resume_collection(state: State<CollectorProcess>) -> Result<(), String> { send_control(state.inner(), "resume") }
+#[tauri::command] fn resume_collection(state: State<CollectorProcess>) -> Result<(), String> {
+    let credential=credentials::read()?;
+    send_control(state.inner(),&serde_json::json!({"command":"resume","credential":credential.map(|(username,password)|serde_json::json!({"username":username,"password":password}))}).to_string())
+}
 #[tauri::command]
 fn stop_collection(state: State<CollectorProcess>) -> Result<(), String> {
     send_control(state.inner(), "shutdown")?;

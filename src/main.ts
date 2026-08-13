@@ -14,16 +14,17 @@ interface CompanyRow {
   revenueKrwMillion?: number; operatingIncomeKrwMillion?: number; netIncomeKrwMillion?: number;
 }
 interface SearchResponse { rows: CompanyRow[]; total: number; page: number; totalPages: number; }
-interface CredentialStatus { saved: boolean; username?: string; }
+interface CredentialStatus { saved: boolean; username?: string; credentialStatus?:string; }
 interface TargetOption { targetId: string; name: string; }
 interface IndustryCodeOption { industryCode:string; industryName:string; classificationLevel?:string; }
 interface IndustryMasterStatus { count:number; lastRefreshedAt?:string; status:string; }
-interface CompanyFullDetail { company: CompanyRow & { lastCollectedAt?:string }; financialStatements:Array<Record<string,unknown>>; businessSites:Array<Record<string,unknown>>; histories:Array<Record<string,unknown>>; executives:Array<Record<string,unknown>>; certifications:Array<Record<string,unknown>>; designations:Array<Record<string,unknown>>; factories:Array<Record<string,unknown>>; patents:Array<Record<string,unknown>>; }
+interface CompanyFullDetail { company: CompanyRow & { lastCollectedAt?:string; sourceUpdatedAt?:string }; financialStatements:Array<Record<string,unknown>>; businessSites:Array<Record<string,unknown>>; histories:Array<Record<string,unknown>>; executives:Array<Record<string,unknown>>; certifications:Array<Record<string,unknown>>; designations:Array<Record<string,unknown>>; }
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 let view: View = "collector";
 let status: CollectorStatus = "IDLE";
 let currentCompany = "수집 대기";
+let lastCollectedCompany = "—";
 let countdown = "—";
 let logs: string[] = [];
 let searchQuery = "";
@@ -33,6 +34,7 @@ let searchTimer: number | undefined;
 let searchSequence = 0;
 let credential: CredentialStatus = { saved: false };
 let loggedIn = false;
+let sessionStatus:"LOGGED_IN"|"LOGGED_OUT"|"EXPIRED"|"REAUTHENTICATING"|"LOGIN_FAILED"|"UNKNOWN"="UNKNOWN";
 let editingCredential = false;
 let collectorTarget = "액체 펌프 제조업";
 let selectedIndustry:IndustryCodeOption|undefined;
@@ -97,7 +99,7 @@ function setupWindowChrome() {
 }
 
 const accountPanel = () => credential.saved && !editingCredential ? `
-  <div class="account-panel"><div><b>SMINFO Account</b><span>ID: <strong>${escapeHtml(credential.username ?? "")}</strong></span><span>Password: <strong class="good">● Windows에 저장됨</strong></span><span>Login: <strong class="${loggedIn ? "good" : "muted"}">${loggedIn ? "● Logged in" : "○ 시작 시 자동 확인"}</strong></span></div><div class="account-actions"><button data-action="edit_account">계정 변경</button><button data-action="delete_account">저장정보 삭제</button></div></div>` : `
+  <div class="account-panel"><div><b>SMINFO Account</b><span>ID: <strong>${escapeHtml(credential.username ?? "")}</strong></span><span>Password: <strong class="good">● Windows에 저장됨</strong></span><span>저장 계정: <strong class="good">● 저장됨</strong></span><span>로그인 상태: <strong class="${loggedIn ? "good" : sessionStatus==="LOGIN_FAILED" ? "error" : "muted"}">${sessionStatus==="LOGGED_IN"?"● 로그인됨":sessionStatus==="EXPIRED"?"○ 세션 만료":sessionStatus==="REAUTHENTICATING"?"○ 자동 재로그인 중…":sessionStatus==="LOGIN_FAILED"?"! 로그인 실패":"○ 로그인되지 않음"}</strong></span></div><div class="account-actions"><button data-action="edit_account">계정 변경</button><button data-action="delete_account">저장정보 삭제</button></div></div>` : `
   <div class="account-panel account-form"><div><b>SMINFO Account</b><span>저장된 비밀번호는 보안상 다시 표시하지 않습니다. 계정 변경 시 새 비밀번호를 입력하세요.</span></div><label>ID<input id="sminfo-id" autocomplete="username" value="${escapeHtml(credential.username ?? "")}"></label><label>Password<input id="sminfo-password" type="password" autocomplete="current-password"></label><div class="account-actions"><button class="primary" data-action="save_account">계정 저장</button>${credential.saved ? '<button data-action="cancel_account">취소</button>' : ""}</div></div>`;
 
 const industryOptionsHtml=()=>industryOptions.length?`<div class="industry-options">${industryOptions.map(item=>`<button type="button" data-industry-code="${escapeHtml(item.industryCode)}"><b>${escapeHtml(item.industryName)}</b><span>${escapeHtml(item.industryCode)}${item.classificationLevel?` · ${escapeHtml(item.classificationLevel)}`:""}</span></button>`).join("")}</div>`:"";
@@ -114,7 +116,7 @@ const collector = () => `
     <div class="status-grid">
       <article><span>브라우저</span><strong>${status === "IDLE" ? "닫힘" : "실행 중"}</strong><small>로그인 프로필 유지</small></article>
       <article><span>SMINFO 상태</span><strong>${status}</strong><small>${status === "READY" ? "수집 가능" : "브라우저 상태를 확인하세요"}</small></article>
-      <article><span>현재 기업</span><strong>${escapeHtml(currentCompany)}</strong><small>저장 완료 기업</small></article>
+      <article><span>현재 기업</span><strong>${escapeHtml(currentCompany)}</strong><small>처리 중 · 최근 저장 ${escapeHtml(lastCollectedCompany)}</small></article>
       <article><span>다음 조회</span><strong id="countdown-value">${countdown}</strong><small>35–40초 간격</small></article>
     </div>
     <div class="workspace">
@@ -148,7 +150,7 @@ const pagination = () => {
 };
 
 const detailRows=(rows:Array<Record<string,unknown>>,columns:Array<[string,string]>)=>rows.length?`<div class="detail-table"><div class="detail-row detail-head">${columns.map(([,label])=>`<b>${label}</b>`).join("")}</div>${rows.map(row=>`<div class="detail-row">${columns.map(([key])=>`<span>${escapeHtml(row[key]??"—")}</span>`).join("")}</div>`).join("")}</div>`:'<div class="detail-empty">수집된 정보가 없습니다.</div>';
-const companyDetail=()=>{const d=selectedCompany!,c=d.company;return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COLLECTED COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)}</h2><p>${escapeHtml(c.businessNumber??c.sminfoKcd)} · 마지막 수집 ${escapeHtml(c.lastCollectedAt??"—")}</p></header><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>대표자</dt><dd>${escapeHtml(c.representativeName??"—")}</dd><dt>기업형태</dt><dd>${escapeHtml(c.companyType??"—")}</dd><dt>상태</dt><dd>${escapeHtml(c.companyStatus??"—")}</dd><dt>설립일</dt><dd>${escapeHtml(c.establishedDate??"—")}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")} ${escapeHtml(c.ksicCode??"")}</dd><dt>주요제품</dt><dd>${escapeHtml(c.mainProducts??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.roadAddress??c.address??"—")}</dd><dt>홈페이지</dt><dd>${escapeHtml(c.homepageUrl??"—")}</dd></dl></div></article><article class="detail-section"><h3>매출현황</h3>${detailRows(d.financialStatements,[["fiscalYear","연도"],["revenue","매출액"],["operatingIncome","영업이익"],["netIncome","당기순이익"],["totalAssets","총자산"]])}</article><article class="detail-section"><h3>사업장정보</h3>${detailRows(d.businessSites,[["siteName","사업장명"],["siteType","구분"],["businessNumber","사업자번호"],["address","주소"]])}</article><article class="detail-section"><h3>연혁</h3>${detailRows(d.histories,[["eventDate","일자"],["description","내용"]])}</article><article class="detail-section"><h3>경영진</h3>${detailRows(d.executives,[["positionTitle","직위"],["maskedName","성명"]])}</article><article class="detail-section"><h3>인증</h3>${detailRows(d.certifications,[["certificationName","인증명"],["certificationNumber","번호"],["issuer","기관"],["acquiredDate","취득일"],["validUntil","유효기간"]])}</article><article class="detail-section"><h3>지정</h3>${detailRows(d.designations,[["designationName","지정명"],["designationNumber","번호"],["authority","기관"],["designatedDate","지정일"],["validUntil","유효기간"]])}</article><article class="detail-section"><h3>공장</h3>${detailRows(d.factories,[["factoryName","공장명"],["locationAddress","소재지"]])}</article><article class="detail-section"><h3>특허</h3>${detailRows(d.patents,[["patentDate","등록일"],["description","내용"]])}</article></section>`};
+const companyDetail=()=>{const d=selectedCompany!,c=d.company;return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COLLECTED COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)}</h2><p>${escapeHtml(c.businessNumber??c.sminfoKcd)} · 마지막 수집 ${escapeHtml(c.lastCollectedAt??"—")}</p></header><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>대표자</dt><dd>${escapeHtml(c.representativeName??"—")}</dd><dt>기업형태</dt><dd>${escapeHtml(c.companyType??"—")}</dd><dt>상태</dt><dd>${escapeHtml(c.companyStatus??"—")}</dd><dt>설립일</dt><dd>${escapeHtml(c.establishedDate??"—")}</dd><dt>정보수정일자</dt><dd>${escapeHtml(c.sourceUpdatedAt??"—")}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")} ${escapeHtml(c.ksicCode??"")}</dd><dt>주요제품</dt><dd>${escapeHtml(c.mainProducts??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.address??"—")}</dd><dt>도로명주소</dt><dd>${escapeHtml(c.roadAddress??"—")}</dd><dt>홈페이지</dt><dd>${escapeHtml(c.homepageUrl??"—")}</dd></dl></div></article><article class="detail-section"><h3>사업장정보</h3>${detailRows(d.businessSites,[["siteName","공장명"],["siteAddress","사업장소재지"]])}</article><article class="detail-section"><h3>연혁</h3>${detailRows(d.histories,[["sourceNumber","번호"],["eventDate","일자"],["description","내용"]])}</article><article class="detail-section"><h3>경영진</h3>${detailRows(d.executives,[["sourceNumber","번호"],["positionTitle","직위"],["maskedName","성명"]])}</article><article class="detail-section"><h3>매출현황</h3>${detailRows(d.financialStatements,[["fiscalYear","연도"],["totalAssets","자산총계"],["paidInCapital","납입자본금"],["totalEquity","자본총계"],["revenue","매출액"],["operatingIncome","영업이익"],["netIncome","당기순이익"]])}</article><article class="detail-section"><h3>인증</h3><h4>인증항목</h4>${detailRows(d.certifications,[["certificationNumber","인증번호"],["certificationName","인증명"],["certificationScope","인증범위"],["validityPeriod","유효기간"],["certificationAuthority","인증기관"]])}<h4>지정</h4>${detailRows(d.designations,[["designationNumber","지정번호"],["designationName","지정명"],["validityPeriod","유효기간"],["operatingAuthority","운영기관"]])}</article></section>`};
 
 const search = () => selectedCompany ? companyDetail() : `
   <section class="page">
@@ -315,9 +317,17 @@ try{const saved=localStorage.getItem("mona-selected-industry");if(saved){const v
 void listen<Record<string,unknown>>("industry-event",event=>{const data=event.payload;industryRefreshRunning=String(data.status)==="RUNNING";logs.push(`${new Date().toLocaleTimeString()} industry ${String(data.message??data.status??"")}`);if(String(data.status)==="COMPLETED")void invoke<IndustryMasterStatus>("industry_master_status").then(value=>{industryStatus=value;industryOptions=[];if(view==="collector")render()});else if(view==="collector")renderPreservingScroll()});
 void listen<Record<string, unknown>>("collector-event", (event) => {
   const data = event.payload;
-  if (data.type === "status") { status = String(data.status) as CollectorStatus; if(status === "LOGIN_FAILED" || status === "CREDENTIAL_REQUIRED") { editingCredential=true; loggedIn=false; } }
-  if (data.type === "company_collected") currentCompany = String(data.companyName);
-  if (data.type === "login_status") loggedIn = Boolean(data.loggedIn);
+  if (data.type === "status") { status = String(data.status) as CollectorStatus; if(status === "CREDENTIAL_REQUIRED") { editingCredential=true; loggedIn=false; sessionStatus="LOGGED_OUT"; } }
+  if (data.type === "status"&&data.companyName) currentCompany=String(data.companyName);
+  if (data.type === "company_collected") {lastCollectedCompany=String(data.companyName);currentCompany="다음 기업 대기";}
+  if(data.type==="company_skipped"){lastCollectedCompany=`${String(data.companyName??currentCompany)} (건너뜀)`;currentCompany="다음 기업 대기";}
+  if (data.type === "login_status") {loggedIn = Boolean(data.loggedIn);sessionStatus=(String(data.sessionStatus??(loggedIn?"LOGGED_IN":"LOGIN_FAILED")) as typeof sessionStatus);}
+  if(data.type==="recovery"){
+    const recoveryStatus=String(data.status);
+    if(recoveryStatus==="SESSION_EXPIRED")sessionStatus="EXPIRED";
+    else if(recoveryStatus==="REAUTHENTICATING")sessionStatus="REAUTHENTICATING";
+    else if(recoveryStatus==="RESUMING_COLLECTION")sessionStatus="LOGGED_IN";
+  }
   if (data.type === "countdown") {
     // The countdown changes every second and already has a dedicated status
     // card. Do not let it evict useful collector diagnostics from the log.
