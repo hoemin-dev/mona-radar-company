@@ -1,16 +1,25 @@
 import type { Locator, Page } from "playwright";
 import { SMINFO_SELECTORS } from "./selectors.js";
+import {SMINFO} from "./constants.js";
+import {inspectBrowserState} from "./session.js";
+import {restoreSearchPage} from "../browser/search-page-recovery.js";
+import {readVisiblePageNumber} from "../browser/navigation-test.js";
 
 export interface IndustryCandidate { code?: string; name: string }
 const clean = (value:string) => value.replace(/\s+/g," ").trim();
 const normalized = (value:string) => clean(value).replace(/\s/g,"").toLowerCase();
 
-async function visibleTextInput(page:Page) {
-  const labelled = page.getByLabel(/검색어|산업명|업종명|산업코드/i).filter({visible:true}).first();
+export async function visibleTextInput(page:Page) {
+  const editableSelector='input:not([type]),input[type="text"],input[type="search"],textarea,[contenteditable="true"]';
+  const labelled = page.getByLabel(/검색어|산업명|업종명|산업코드/i).and(page.locator(editableSelector)).filter({visible:true}).first();
   if (await labelled.count()) return labelled;
-  const inputs = page.locator('input[type="text"]:visible');
-  if (!(await inputs.count())) throw new Error("INDUSTRY_KEYWORD_INPUT_NOT_FOUND");
-  return inputs.last();
+  const likely=page.locator(`${editableSelector}:visible`).filter({hasNot:page.locator('[type="hidden"]')});
+  for(const candidate of await likely.all()){
+    const meta=await candidate.evaluate(element=>({tag:element.tagName.toLowerCase(),type:(element as HTMLInputElement).type??"",name:(element as HTMLInputElement).name??"",id:(element as HTMLElement).id??"",placeholder:(element as HTMLInputElement).placeholder??""}));
+    if(/search|query|keyword|검색|산업|업종/i.test(`${meta.name} ${meta.id} ${meta.placeholder}`))return candidate;
+  }
+  if(await likely.count())return likely.last();
+  throw new Error(`INDUSTRY_KEYWORD_INPUT_NOT_FOUND url=${page.url()}`);
 }
 
 async function clickExactButton(page:Page,name:string) {
@@ -51,10 +60,16 @@ async function choose(row:Locator,page:Page) {
 
 export async function resolveIndustry(page:Page,target:string,emit:(event:unknown)=>void,preferredCode?:string):Promise<IndustryCandidate>{
   const before=new Set(page.context().pages());
-  const popupPromise=page.waitForEvent("popup",{timeout:3_000}).catch(()=>undefined);
-  await page.getByText("산업코드찾기",{exact:true}).filter({visible:true}).first().click();
-  const popup=await popupPromise;
-  const lookup=popup??page.context().pages().find(x=>!before.has(x))??page;
+  let lookup:Page|undefined;
+  for(const candidate of page.context().pages().filter(candidate=>candidate!==page&&!candidate.isClosed())){
+    if(await visibleTextInput(candidate).then(()=>true).catch(()=>false)){lookup=candidate;break}
+  }
+  if(!lookup){
+    const popupPromise=page.waitForEvent("popup",{timeout:3_000}).catch(()=>undefined);
+    await page.getByText("산업코드찾기",{exact:true}).filter({visible:true}).first().click();
+    const popup=await popupPromise;
+    lookup=popup??page.context().pages().find(x=>!before.has(x))??page;
+  }
   await lookup.waitForLoadState("domcontentloaded").catch(()=>undefined);
   const input=await visibleTextInput(lookup);
   await input.fill(target);
@@ -120,4 +135,67 @@ export async function runCompanySearch(page:Page,industry?:IndustryCandidate,emi
   const totalText=bodyText.match(/검색결과\s*([\d,]+)\s*건/)?.[1];
   const total=totalText?Number(totalText.replace(/,/g,"")):undefined;
   emit({type:"company_search_ready",total,message:total===undefined?"SMINFO company search results loaded":`SMINFO company search results: ${total.toLocaleString()} companies`});
+}
+
+interface SearchRepairOptions {target:string;preferredCode?:string;targetPage?:number}
+export interface SearchRepairHooks {
+  inspect:(page:Page)=>ReturnType<typeof inspectBrowserState>;
+  conditionPresent:(page:Page,industry:IndustryCandidate)=>Promise<boolean>;
+  reload:(page:Page)=>Promise<void>;
+  ready:(page:Page)=>Promise<void>;
+  resolve:(page:Page,target:string,emit:(event:unknown)=>void,preferredCode?:string)=>Promise<IndustryCandidate>;
+  search:(page:Page,industry:IndustryCandidate,emit:(event:unknown)=>void)=>Promise<void>;
+  restore:(page:Page,targetPage:number,emit:(event:unknown)=>void)=>Promise<void>;
+  currentPage:(page:Page)=>Promise<number|undefined>;
+}
+
+const searchButton=(page:Page)=>page.locator('button.btn.btn_blue[onclick*="doSelect"]').filter({visible:true,hasText:/^\s*검색\s*$/});
+const conditionPresent=async(page:Page,industry:IndustryCandidate)=>{
+  const finder=page.getByText("산업코드찾기",{exact:true}).filter({visible:true}).first();
+  if(!(await finder.count()))return false;
+  const row=finder.locator("xpath=ancestor::tr[1]");
+  const scope=await row.count()?row:finder.locator("xpath=..");
+  const snapshot=await scope.evaluate(element=>({text:(element.textContent??"").replace(/\s+/g," ").trim(),values:Array.from(element.querySelectorAll<HTMLInputElement>("input")).map(input=>input.value.trim()).filter(Boolean)})).catch(()=>({text:"",values:[]}));
+  const haystack=normalized([snapshot.text,...snapshot.values].join(" "));
+  return Boolean((industry.code&&haystack.includes(normalized(industry.code)))||haystack.includes(normalized(industry.name)));
+};
+const waitForSearchUi=async(page:Page)=>{
+  await page.getByText("산업코드찾기",{exact:true}).filter({visible:true}).first().waitFor({state:"visible",timeout:30_000});
+  const button=searchButton(page).first();
+  await button.waitFor({state:"visible",timeout:30_000});
+  if(!(await button.isEnabled()))throw new Error("COMPANY_SEARCH_BUTTON_DISABLED");
+};
+const defaultRepairHooks:SearchRepairHooks={
+  inspect:inspectBrowserState,
+  conditionPresent,
+  reload:async page=>{await page.reload({waitUntil:"domcontentloaded",timeout:30_000});},
+  ready:waitForSearchUi,
+  resolve:resolveIndustry,
+  search:runCompanySearch,
+  restore:restoreSearchPage,
+  currentPage:readVisiblePageNumber,
+};
+
+export async function runCompanySearchWithRepair(page:Page,industry:IndustryCandidate,options:SearchRepairOptions,emit:(event:unknown)=>void=()=>undefined,hooks:SearchRepairHooks=defaultRepairHooks){
+  try{await hooks.search(page,industry,emit);if(options.targetPage&&options.targetPage>1)await hooks.restore(page,options.targetPage,emit);return industry;}catch(error){
+    const reason=error instanceof Error?error.message:String(error);
+    if(!reason.includes("COMPANY_SEARCH_BUTTON_NOT_FOUND"))throw error;
+    const state=await hooks.inspect(page);const applied=await hooks.conditionPresent(page,industry);const count=await searchButton(page).count().catch(()=>0);
+    const incomplete=state.sessionStatus==="LOGGED_IN"&&state.path===SMINFO.searchPath&&applied&&count===0;
+    if(!incomplete)throw error;
+    emit({type:"search_page_incomplete_detected",url:state.url,searchButtonCount:count,target:options.target,targetPage:options.targetPage,message:`search_page_incomplete_detected url=${state.url} searchButtonCount=${count} target=${options.target} targetPage=${options.targetPage??1}`});
+    emit({type:"search_page_repair_start",attempt:1,maxAttempts:1,reason:"COMPANY_SEARCH_BUTTON_NOT_FOUND",message:"search_page_repair_start attempt=1/1 reason=COMPANY_SEARCH_BUTTON_NOT_FOUND"});
+    try{
+      await hooks.reload(page);emit({type:"search_page_repair_reloaded",url:page.url(),message:`search_page_repair_reloaded url=${page.url()}`});
+      await hooks.ready(page);emit({type:"search_page_repair_ready",message:"search_page_repair_ready"});
+      const restored=await hooks.resolve(page,options.target,emit,options.preferredCode??industry.code);
+      emit({type:"search_page_repair_target_restored",target:options.target,industryCode:restored.code,message:`search_page_repair_target_restored target=${options.target}`});
+      await hooks.search(page,restored,emit);
+      if(options.targetPage&&options.targetPage>1)await hooks.restore(page,options.targetPage,emit);
+      const actualPage=await hooks.currentPage(page);
+      if(options.targetPage&&actualPage!==options.targetPage)throw new Error(`SEARCH_PAGE_REPAIR_PAGE_MISMATCH expected=${options.targetPage} actual=${actualPage??"unknown"}`);
+      emit({type:"search_page_repair_success",targetPage:options.targetPage??1,actualPage:actualPage??1,message:`search_page_repair_success targetPage=${options.targetPage??1} actualPage=${actualPage??1}`});
+      return restored;
+    }catch(repairError){const repairReason=repairError instanceof Error?repairError.message:String(repairError);emit({type:"search_page_repair_failed",reason:repairReason,message:`search_page_repair_failed reason=${repairReason}`});throw new Error(`SEARCH_PAGE_REPAIR_FAILED reason=${repairReason}`);}
+  }
 }

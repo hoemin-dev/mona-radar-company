@@ -1,5 +1,5 @@
 import {describe,expect,it} from "vitest";
-import {choosePaginationControl,type PaginationSnapshot} from "../browser/search-page-recovery.js";
+import {choosePaginationControl,paginationMoveReady,type PaginationSnapshot} from "../browser/search-page-recovery.js";
 import {restoreSearchPage} from "../browser/search-page-recovery.js";
 import {chromium} from "playwright";
 
@@ -11,6 +11,8 @@ describe("pagination block recovery",()=>{
   it("selects page 12 after entering the 11-20 block",()=>expect(choosePaginationControl(block(11,11,20,21),12)?.target).toBe(12));
   it("uses the previous-block control when moving backwards",()=>{const state:blockReturn={current:11,blockStart:11,blockEnd:20,controls:[{text:"이전",target:10},...Array.from({length:10},(_,i)=>({text:String(11+i),target:11+i}))]};expect(choosePaginationControl(state,1)?.target).toBe(10)});
   it("returns undefined instead of consuming a queue when no usable control exists",()=>expect(choosePaginationControl({current:1,controls:[],blockStart:1,blockEnd:1},11)).toBeUndefined());
+  it("prefers the next-block control instead of stepping through every visible page",()=>expect(choosePaginationControl(block(1,1,10,11),74)?.target).toBe(11));
+  it("waits for the exact target page, refreshed pagination and result rows",()=>{expect(paginationMoveReady(block(10,1,10,11),11,10)).toBe(false);expect(paginationMoveReady({current:11,controls:[]},11,10)).toBe(false);expect(paginationMoveReady(block(11,11,20,21),11,0)).toBe(false);expect(paginationMoveReady(block(11,11,20,21),11,10)).toBe(true)});
 });
 
 type blockReturn=PaginationSnapshot;
@@ -25,4 +27,4 @@ it.skipIf(!process.env.RUN_BROWSER_TESTS)("restores page 11 through the next blo
   await restoreSearchPage(page,11,()=>undefined);expect(await page.locator("strong.current").textContent()).toBe("11");
   await restoreSearchPage(page,12,()=>undefined);expect(await page.locator("strong.current").textContent()).toBe("12");
   await browser.close();
-});
+},30_000);

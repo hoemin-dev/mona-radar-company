@@ -18,6 +18,7 @@ const MIGRATION_003: &str = include_str!("../migrations/003_company_detail_secti
 const MIGRATION_004: &str = include_str!("../migrations/004_collection_quality.sql");
 const MIGRATION_005: &str = include_str!("../migrations/005_industry_master.sql");
 const MIGRATION_006: &str = include_str!("../migrations/006_source_detail_model.sql");
+const MIGRATION_007: &str = include_str!("../migrations/007_company_disclosure_state.sql");
 #[cfg(windows)]
 struct CollectorChild {
     child: Child,
@@ -113,6 +114,7 @@ fn connection(app: &AppHandle) -> Result<Connection, String> {
     conn.execute_batch(MIGRATION_004).map_err(|e| e.to_string())?;
     conn.execute_batch(MIGRATION_005).map_err(|e| e.to_string())?;
     conn.execute_batch(MIGRATION_006).map_err(|e| e.to_string())?;
+    conn.execute_batch(MIGRATION_007).map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
@@ -138,6 +140,8 @@ struct CompanyRow {
     revenue_krw_million: Option<i64>,
     operating_income_krw_million: Option<i64>,
     net_income_krw_million: Option<i64>,
+    disclosure_status: Option<String>,
+    disclosure_confirmed_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -186,8 +190,8 @@ where F:FnMut(&Row<'_>)->rusqlite::Result<serde_json::Value>{
 #[tauri::command]
 fn get_company_detail(app:AppHandle,company_id:String)->Result<serde_json::Value,String>{
     let conn=connection(&app)?;
-    let company=conn.query_row("SELECT company_id,sminfo_kcd,business_number,company_name,representative_name,company_type,company_status,established_date,address,road_address,homepage_url,main_products,ksic_code,industry_name,last_collected_at,source_updated_at FROM companies WHERE company_id=?",params![&company_id],|r|Ok(serde_json::json!({
-      "companyId":r.get::<_,String>(0)?,"sminfoKcd":r.get::<_,String>(1)?,"businessNumber":r.get::<_,Option<String>>(2)?,"companyName":r.get::<_,String>(3)?,"representativeName":r.get::<_,Option<String>>(4)?,"companyType":r.get::<_,Option<String>>(5)?,"companyStatus":r.get::<_,Option<String>>(6)?,"establishedDate":r.get::<_,Option<String>>(7)?,"address":r.get::<_,Option<String>>(8)?,"roadAddress":r.get::<_,Option<String>>(9)?,"homepageUrl":r.get::<_,Option<String>>(10)?,"mainProducts":r.get::<_,Option<String>>(11)?,"ksicCode":r.get::<_,Option<String>>(12)?,"industryName":r.get::<_,Option<String>>(13)?,"lastCollectedAt":r.get::<_,String>(14)?,"sourceUpdatedAt":r.get::<_,Option<String>>(15)?
+    let company=conn.query_row("SELECT c.company_id,c.sminfo_kcd,c.business_number,c.company_name,c.representative_name,c.company_type,c.company_status,c.established_date,c.address,c.road_address,c.homepage_url,c.main_products,c.ksic_code,c.industry_name,c.last_collected_at,c.source_updated_at,d.disclosure_status,d.confirmed_at FROM companies c LEFT JOIN company_disclosure_state d ON d.company_id=c.company_id WHERE c.company_id=?",params![&company_id],|r|Ok(serde_json::json!({
+      "companyId":r.get::<_,String>(0)?,"sminfoKcd":r.get::<_,String>(1)?,"businessNumber":r.get::<_,Option<String>>(2)?,"companyName":r.get::<_,String>(3)?,"representativeName":r.get::<_,Option<String>>(4)?,"companyType":r.get::<_,Option<String>>(5)?,"companyStatus":r.get::<_,Option<String>>(6)?,"establishedDate":r.get::<_,Option<String>>(7)?,"address":r.get::<_,Option<String>>(8)?,"roadAddress":r.get::<_,Option<String>>(9)?,"homepageUrl":r.get::<_,Option<String>>(10)?,"mainProducts":r.get::<_,Option<String>>(11)?,"ksicCode":r.get::<_,Option<String>>(12)?,"industryName":r.get::<_,Option<String>>(13)?,"lastCollectedAt":r.get::<_,String>(14)?,"sourceUpdatedAt":r.get::<_,Option<String>>(15)?,"disclosureStatus":r.get::<_,Option<String>>(16)?,"disclosureConfirmedAt":r.get::<_,Option<String>>(17)?
     }))).optional().map_err(|e|e.to_string())?.ok_or("기업을 찾을 수 없습니다.")?;
     let financials=json_rows(&conn,"SELECT fiscal_year,total_assets_krw_million,paid_in_capital_krw_million,total_equity_krw_million,revenue_krw_million,operating_income_krw_million,net_income_krw_million FROM company_financial_statements WHERE company_id=? ORDER BY fiscal_year DESC",&company_id,|r|Ok(serde_json::json!({"fiscalYear":r.get::<_,i64>(0)?,"totalAssets":r.get::<_,Option<i64>>(1)?,"paidInCapital":r.get::<_,Option<i64>>(2)?,"totalEquity":r.get::<_,Option<i64>>(3)?,"revenue":r.get::<_,Option<i64>>(4)?,"operatingIncome":r.get::<_,Option<i64>>(5)?,"netIncome":r.get::<_,Option<i64>>(6)?})))?;
     let sites=json_rows(&conn,"SELECT site_name,site_address FROM company_source_business_sites WHERE company_id=? ORDER BY source_ordinal",&company_id,|r|Ok(serde_json::json!({"siteName":r.get::<_,Option<String>>(0)?,"siteAddress":r.get::<_,Option<String>>(1)?})))?;
@@ -229,9 +233,10 @@ fn search_companies(app: AppHandle, query: Option<String>, page: Option<i64>, ta
     let effective_offset = (effective_page - 1) * page_size;
     let normalized_name = "trim(replace(replace(replace(c.company_name,'(주)',''),'㈜',''),'주식회사',''))";
     let sql = format!(
-        "SELECT c.company_id,c.sminfo_kcd,c.business_number,c.company_name,c.representative_name,c.company_type,c.company_status,c.established_date,c.address,c.road_address,c.homepage_url,c.main_products,c.ksic_code,c.industry_name,latest.fiscal_year,latest.total_assets_krw_million,latest.revenue_krw_million,latest.operating_income_krw_million,latest.net_income_krw_million
+        "SELECT c.company_id,c.sminfo_kcd,c.business_number,c.company_name,c.representative_name,c.company_type,c.company_status,c.established_date,c.address,c.road_address,c.homepage_url,c.main_products,c.ksic_code,c.industry_name,latest.fiscal_year,latest.total_assets_krw_million,latest.revenue_krw_million,latest.operating_income_krw_million,latest.net_income_krw_million,d.disclosure_status,d.confirmed_at
          FROM companies c
          LEFT JOIN company_financial_statements latest ON latest.company_id=c.company_id AND latest.fiscal_year=(SELECT MAX(fiscal_year) FROM company_financial_statements WHERE company_id=c.company_id)
+         LEFT JOIN company_disclosure_state d ON d.company_id=c.company_id
          WHERE {where_sql}
          ORDER BY CASE WHEN substr({normalized_name},1,1) BETWEEN '가' AND '힣' THEN 0 WHEN lower(substr({normalized_name},1,1)) BETWEEN 'a' AND 'z' THEN 1 ELSE 2 END, {normalized_name} COLLATE NOCASE, c.company_name COLLATE NOCASE
          LIMIT ?3 OFFSET ?4"
@@ -245,6 +250,7 @@ fn search_companies(app: AppHandle, query: Option<String>, page: Option<i64>, ta
                 address: r.get(8)?, road_address: r.get(9)?, homepage_url: r.get(10)?, main_products: r.get(11)?,
                 ksic_code: r.get(12)?, industry_name: r.get(13)?, fiscal_year: r.get(14)?, total_assets_krw_million: r.get(15)?,
                 revenue_krw_million: r.get(16)?, operating_income_krw_million: r.get(17)?, net_income_krw_million: r.get(18)?,
+                disclosure_status: r.get(19)?, disclosure_confirmed_at: r.get(20)?,
             })
         })
         .map_err(|e| e.to_string())?

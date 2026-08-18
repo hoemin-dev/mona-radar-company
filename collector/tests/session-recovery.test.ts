@@ -15,6 +15,7 @@ describe("SMINFO session recovery classification",()=>{
   it("treats session expiration and context loss as recoverable",()=>expect([isRecoverableNavigationCode("SESSION_EXPIRED"),isRecoverableNavigationCode("SEARCH_CONTEXT_LOST")]).toEqual([true,true]));
   it("uses CREDENTIAL_REQUIRED only when credential is missing",()=>expect(recoveryFailureCode("CREDENTIAL_REQUIRED")).toBe("CREDENTIAL_REQUIRED"));
   it("distinguishes saved-credential login failure from missing credentials",()=>expect(recoveryFailureCode("LOGIN_FAILED INVALID_CREDENTIAL")).toBe("LOGIN_FAILED"));
+  it("keeps an uncertain authentication outcome distinct during recovery",()=>expect(recoveryFailureCode("LOGIN_FAILED LOGIN_STATE_UNCERTAIN")).toBe("LOGIN_STATE_UNCERTAIN"));
   it("classifies disclosure denial as a normal skip",()=>expect(classifyCollectorError("DISCLOSURE_DENIED")).toBe("SKIP"));
   it("classifies missing company links as company-local errors",()=>expect(classifyCollectorError("COMPANY_LINK_NOT_FOUND")).toBe("COMPANY_ERROR"));
   it("classifies lost search context as a system error",()=>expect(classifyCollectorError("SEARCH_CONTEXT_LOST")).toBe("SYSTEM_ERROR"));

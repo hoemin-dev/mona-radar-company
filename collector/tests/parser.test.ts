@@ -6,6 +6,19 @@ import { parseSearchResult } from "../parser/search-result.js";
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
 describe("SMINFO semantic parsers", () => {
+  it("keeps search-form options out of 대한기계 basic fields",()=>{
+    const result=parseCompanyDetail(fixture("daehan-machinery-detail.html"));
+    expect(result).toMatchObject({kcd:"0001087424",companyName:"대한기계",companyType:"개인사업자",establishedDate:"2007-04-26",sourceUpdatedAt:"2021-06-25"});
+    expect(result.businessSites).toEqual([{siteName:"본사",siteAddress:undefined},{siteName:"공장",siteAddress:"충남 천안시 서북구 신당동 453-4"}]);
+    expect(`${result.companyType} ${result.establishedDate}`).not.toMatch(/조건없음|유가증권시장|코스닥시장|코넥스|1개월내|3개월내/);
+    expect(result.sectionStatuses.basic_info.status).toBe("VERIFIED");
+  });
+  it("marks unresolved search-form label collisions as non-verified",()=>{
+    const result=parseCompanyDetail(`<input name="comNm" value="회사"><input name="ksic11BzcCdNm" value="액체펌프제조업"><table><tr><th>기업형태</th><td><select><option>조건없음</option><option>코스닥시장</option></select></td></tr><tr><th>설립일</th><td><select><option>조건없음</option><option>1개월내</option></select></td></tr></table>`);
+    expect(result.companyType).toBeUndefined();
+    expect(result.establishedDate).toBeUndefined();
+    expect(result.sectionStatuses.basic_info).toMatchObject({status:"PARTIAL",error:"BASIC_INFO_SANITY_FAILED"});
+  });
   it("reads search totals, pages and company identifiers", () => {
     const result = parseSearchResult(fixture("search-result.html"));
     expect(result.total).toBeGreaterThan(0);
@@ -87,10 +100,11 @@ describe("SMINFO semantic parsers", () => {
     expect(many.businessSites).toEqual([{siteName:"1공장",siteAddress:"서울"},{siteName:"2공장",siteAddress:"부산"}]);
   });
 
-  it("does not save an incomplete business-site pair as an empty section",()=>{
+  it("preserves a source business-site row whose address is blank",()=>{
     const result=parseCompanyDetail(`<h3>사업장정보</h3><table><tr><th>공장명</th><td>본사</td></tr></table>`);
-    expect(result.businessSites).toEqual([]);
-    expect(result.sectionStatuses.business_site.status).toBe("PARTIAL");
+    expect(result.businessSites).toHaveLength(1);
+    expect(result.businessSites[0]?.siteAddress).toBeUndefined();
+    expect(result.sectionStatuses.business_site.status).toBe("VERIFIED");
   });
 
   it("keeps certification and designation validity periods as raw strings",()=>{

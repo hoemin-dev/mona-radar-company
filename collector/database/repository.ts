@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { CompanyDetail, CompanySourceSummary, DetailSectionName, SectionStatus } from "../../src/shared/types.js";
 
 const now=()=>new Date().toISOString();
-export const COLLECTOR_SCHEMA_VERSION=6;
+export const COLLECTOR_SCHEMA_VERSION=7;
 export const DETAIL_REVERIFY_AFTER_MS=30*24*60*60*1000;
 const replaceable=(status:SectionStatus)=>status==="VERIFIED"||status==="CONFIRMED_EMPTY";
+const contaminatedBasic=(value:string|undefined)=>Boolean(value&&(/\uC870\uAC74\uC5C6\uC74C|\uC720\uAC00\uC99D\uAD8C\uC2DC\uC7A5|\uCF54\uC2A4\uB2E5\uC2DC\uC7A5|\uCF54\uB125\uC2A4|[136]\uAC1C\uC6D4\uB0B4/.test(value)));
 
 export class Repository {
  private db:DatabaseSync;
@@ -27,13 +28,14 @@ export class Repository {
  linkCollectedCompany(targetId:string,itemId:string,industryCode?:string){const row=this.db.prepare("SELECT company_id FROM collection_items WHERE collection_item_id=?").get(itemId) as {company_id:string}|undefined;if(!row?.company_id)return;const t=now();this.db.prepare("INSERT INTO company_industries(company_id,target_id,industry_code,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(company_id,target_id) DO UPDATE SET industry_code=COALESCE(excluded.industry_code,company_industries.industry_code),updated_at=excluded.updated_at").run(row.company_id,targetId,industryCode??null,t,t)}
  linkQueuedCompanies(targetId:string,jobId:string){const t=now();this.db.prepare("INSERT OR IGNORE INTO company_industries(company_id,target_id,created_at,updated_at) SELECT company_id,?,?,? FROM collection_items WHERE collection_job_id=? AND company_id IS NOT NULL").run(targetId,t,t,jobId)}
  createJob(total:number,pages:number,summary?:string,limit?:number){const id=randomUUID(),t=now();this.db.prepare("INSERT INTO collection_jobs(collection_job_id,status,search_summary,source_result_total,source_total_pages,dev_max_companies,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").run(id,"READY",summary??null,total,pages,limit??null,t,t);this.event(id,undefined,"COLLECTION_STARTED",`Job created: source_total=${total}, pages=${pages}`);return id}
+ restartSearchExecution(jobId:string,total:number,pages:number,reason:string){const t=now();this.db.exec("BEGIN IMMEDIATE");try{this.db.prepare("DELETE FROM collection_items WHERE collection_job_id=? AND status IN ('PENDING','RUNNING')").run(jobId);this.db.prepare("UPDATE collection_jobs SET status='RUNNING',source_result_total=?,source_total_pages=?,updated_at=? WHERE collection_job_id=?").run(total,pages,t,jobId);this.event(jobId,undefined,"SEARCH_CONTEXT_REBUILT",`reason=${reason} source_total=${total}, pages=${pages}`);this.db.exec("COMMIT");}catch(error){this.db.exec("ROLLBACK");throw error}}
 
  enqueue(jobId:string,page:number,rows:CompanySourceSummary[]){
   const item=this.db.prepare("INSERT OR IGNORE INTO collection_items(collection_item_id,collection_job_id,sminfo_kcd,company_name_snapshot,source_page_number,source_row_number,status,company_id,finished_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
-  const find=this.db.prepare("SELECT c.company_id,s.collection_quality,s.last_detail_verified_at FROM companies c LEFT JOIN company_collection_state s ON s.company_id=c.company_id WHERE c.sminfo_kcd=?");
+   const find=this.db.prepare("SELECT c.company_id,c.company_type,c.established_date,s.collection_quality,s.last_detail_verified_at,d.disclosure_status FROM companies c LEFT JOIN company_collection_state s ON s.company_id=c.company_id LEFT JOIN company_disclosure_state d ON d.company_id=c.company_id WHERE c.sminfo_kcd=?");
   this.db.exec("BEGIN IMMEDIATE");
   try{for(const [i,x] of rows.entries()){
-   const t=now();let found=find.get(x.kcd) as {company_id:string;collection_quality?:string;last_detail_verified_at?:string}|undefined;
+   const t=now();let found=find.get(x.kcd) as {company_id:string;company_type?:string;established_date?:string;collection_quality?:string;last_detail_verified_at?:string;disclosure_status?:string}|undefined;
    if(!found){
     const companyId=randomUUID();
     this.db.prepare("INSERT INTO companies(company_id,sminfo_kcd,company_name,representative_name,company_type,road_address,industry_name,first_collected_at,last_collected_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(companyId,x.kcd,x.companyName,x.representativeName??null,x.companyType??null,x.roadAddress??null,x.industryName??null,t,t,t,t);
@@ -44,10 +46,13 @@ export class Repository {
     this.db.prepare("INSERT OR IGNORE INTO company_collection_state(company_id,collection_quality,collector_schema_version,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,'UNKNOWN',?,?,?,?,?)").run(found.company_id,COLLECTOR_SCHEMA_VERSION,t,t,t,t);
     this.db.prepare("UPDATE company_collection_state SET last_seen_at=?,updated_at=? WHERE company_id=?").run(t,t,found.company_id);
    }
-   const fresh=found.collection_quality==="VERIFIED"&&Boolean(found.last_detail_verified_at)&&Date.parse(found.last_detail_verified_at!)>=Date.now()-DETAIL_REVERIFY_AFTER_MS;
-   const status=fresh?"SKIPPED":"PENDING";const itemId=randomUUID();
-   item.run(itemId,jobId,x.kcd,x.companyName,page,i+1,status,found.company_id,fresh?t:null,t,t);
+   const fresh=found.collection_quality==="VERIFIED"&&!contaminatedBasic(found.company_type)&&!contaminatedBasic(found.established_date)&&Boolean(found.last_detail_verified_at)&&Date.parse(found.last_detail_verified_at!)>=Date.now()-DETAIL_REVERIFY_AFTER_MS;
+   const disclosureDenied=found.disclosure_status==="DISCLOSURE_DENIED";
+   const status=fresh||disclosureDenied?"SKIPPED":"PENDING";const itemId=randomUUID();
+   const inserted=item.run(itemId,jobId,x.kcd,x.companyName,page,i+1,status,found.company_id,status==="SKIPPED"?t:null,t,t);
+   if(inserted.changes===0)continue;
    if(fresh)this.event(jobId,itemId,"COMPANY_SKIPPED",`Fresh VERIFIED detail skipped: ${x.kcd}`);
+   else if(disclosureDenied)this.event(jobId,itemId,"DISCLOSURE_DENIED",`Previously confirmed disclosure denied; skipped: ${x.kcd}`);
   }this.db.exec("COMMIT");}catch(e){this.db.exec("ROLLBACK");throw e}
  }
  next(jobId:string){return this.db.prepare("SELECT collection_item_id,sminfo_kcd,company_name_snapshot,source_page_number,source_row_number FROM collection_items WHERE collection_job_id=? AND status='PENDING' ORDER BY source_page_number,source_row_number LIMIT 1").get(jobId) as {collection_item_id:string;sminfo_kcd:string;company_name_snapshot:string;source_page_number:number;source_row_number:number}|undefined}
@@ -59,13 +64,19 @@ export class Repository {
   const sectionStatuses=detail.sectionStatuses??fallbackStatuses as CompanyDetail["sectionStatuses"];
   const collectionQuality=detail.collectionQuality??"UNKNOWN";
   const t=now();const item=this.db.prepare("SELECT collection_job_id FROM collection_items WHERE collection_item_id=?").get(itemId) as {collection_job_id:string};
-  const existing=this.db.prepare("SELECT company_id FROM companies WHERE sminfo_kcd=?").get(detail.kcd) as {company_id:string}|undefined;
+  const existing=this.db.prepare("SELECT company_id,company_type,established_date FROM companies WHERE sminfo_kcd=?").get(detail.kcd) as {company_id:string;company_type?:string;established_date?:string}|undefined;
   const companyId=existing?.company_id??randomUUID();
   if(detail.businessNumber){const conflict=this.db.prepare("SELECT company_id,sminfo_kcd FROM companies WHERE business_number=? AND company_id<>?").get(detail.businessNumber,companyId) as {company_id:string;sminfo_kcd:string}|undefined;if(conflict)throw new Error(`IDENTITY_CONFLICT business_number=${detail.businessNumber} existing_kcd=${conflict.sminfo_kcd} incoming_kcd=${detail.kcd}`)}
   this.db.exec("BEGIN IMMEDIATE");
   try{
    this.db.prepare(`INSERT INTO companies(company_id,sminfo_kcd,business_number,company_name,representative_name,company_type,company_status,established_date,address,road_address,homepage_url,main_products,ksic_code,industry_name,first_collected_at,last_collected_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sminfo_kcd) DO UPDATE SET business_number=COALESCE(excluded.business_number,companies.business_number),company_name=CASE WHEN excluded.company_name<>'' THEN excluded.company_name ELSE companies.company_name END,representative_name=COALESCE(excluded.representative_name,companies.representative_name),company_type=COALESCE(excluded.company_type,companies.company_type),company_status=COALESCE(excluded.company_status,companies.company_status),established_date=COALESCE(excluded.established_date,companies.established_date),address=COALESCE(excluded.address,companies.address),road_address=COALESCE(excluded.road_address,companies.road_address),homepage_url=COALESCE(excluded.homepage_url,companies.homepage_url),main_products=COALESCE(excluded.main_products,companies.main_products),ksic_code=COALESCE(excluded.ksic_code,companies.ksic_code),industry_name=COALESCE(excluded.industry_name,companies.industry_name),last_collected_at=excluded.last_collected_at,updated_at=excluded.updated_at`).run(companyId,detail.kcd,detail.businessNumber??null,detail.companyName,detail.representativeName??null,detail.companyType??null,detail.companyStatus??null,detail.establishedDate??null,detail.address??null,detail.roadAddress??null,detail.homepage??null,detail.mainProducts??null,detail.ksicCode??null,detail.industryName??null,t,t,t,t);
-   if(detail.sourceUpdatedAt)this.db.prepare("UPDATE companies SET source_updated_at=? WHERE sminfo_kcd=?").run(detail.sourceUpdatedAt,detail.kcd);
+   if(sectionStatuses.basic_info.status==="VERIFIED")this.db.prepare("UPDATE companies SET business_number=?,company_name=?,representative_name=?,company_type=?,company_status=?,established_date=?,address=?,road_address=?,homepage_url=?,main_products=?,ksic_code=?,industry_name=?,source_updated_at=?,updated_at=? WHERE sminfo_kcd=?").run(detail.businessNumber??null,detail.companyName,detail.representativeName??null,detail.companyType??null,detail.companyStatus??null,detail.establishedDate??null,detail.address??null,detail.roadAddress??null,detail.homepage??null,detail.mainProducts??null,detail.ksicCode??null,detail.industryName??null,detail.sourceUpdatedAt??null,t,detail.kcd);
+   else if(sectionStatuses.basic_info.status==="PARTIAL"){
+    if(!detail.companyType&&contaminatedBasic(existing?.company_type))this.db.prepare("UPDATE companies SET company_type=NULL WHERE sminfo_kcd=?").run(detail.kcd);
+    if(!detail.establishedDate&&contaminatedBasic(existing?.established_date))this.db.prepare("UPDATE companies SET established_date=NULL WHERE sminfo_kcd=?").run(detail.kcd);
+    if(detail.sourceUpdatedAt)this.db.prepare("UPDATE companies SET source_updated_at=? WHERE sminfo_kcd=?").run(detail.sourceUpdatedAt,detail.kcd);
+   }
+   else if(detail.sourceUpdatedAt)this.db.prepare("UPDATE companies SET source_updated_at=? WHERE sminfo_kcd=?").run(detail.sourceUpdatedAt,detail.kcd);
    if(replaceable(sectionStatuses.financial.status)&&sectionStatuses.financial.status==="VERIFIED"){
     const fs=this.db.prepare(`INSERT INTO company_financial_statements(financial_statement_id,company_id,fiscal_year,total_assets_krw_million,paid_in_capital_krw_million,total_equity_krw_million,revenue_krw_million,operating_income_krw_million,net_income_krw_million,collected_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(company_id,fiscal_year) DO UPDATE SET total_assets_krw_million=COALESCE(excluded.total_assets_krw_million,company_financial_statements.total_assets_krw_million),paid_in_capital_krw_million=COALESCE(excluded.paid_in_capital_krw_million,company_financial_statements.paid_in_capital_krw_million),total_equity_krw_million=COALESCE(excluded.total_equity_krw_million,company_financial_statements.total_equity_krw_million),revenue_krw_million=COALESCE(excluded.revenue_krw_million,company_financial_statements.revenue_krw_million),operating_income_krw_million=COALESCE(excluded.operating_income_krw_million,company_financial_statements.operating_income_krw_million),net_income_krw_million=COALESCE(excluded.net_income_krw_million,company_financial_statements.net_income_krw_million),collected_at=excluded.collected_at,updated_at=excluded.updated_at`);
     for(const x of detail.financialStatements)fs.run(randomUUID(),companyId,x.fiscalYear,x.totalAssets??null,x.equity??null,x.totalCapital??null,x.revenue??null,x.operatingIncome??null,x.netIncome??null,t,t,t);
@@ -86,7 +97,25 @@ export class Repository {
  }catch(e){this.db.exec("ROLLBACK");throw e}
  }
  fail(itemId:string,code:string,message:string){const t=now();const row=this.db.prepare("SELECT collection_job_id,company_id FROM collection_items WHERE collection_item_id=?").get(itemId) as {collection_job_id:string;company_id?:string};this.db.prepare("UPDATE collection_items SET status='FAILED',error_code=?,error_message=?,finished_at=?,updated_at=? WHERE collection_item_id=?").run(code,message.slice(0,500),t,t,itemId);if(row?.company_id){this.db.prepare("UPDATE company_collection_state SET collection_quality=CASE WHEN collection_quality='VERIFIED' THEN collection_quality ELSE 'FAILED' END,last_error_code=?,last_error_message=?,last_collected_at=?,updated_at=? WHERE company_id=?").run(code,message.slice(0,500),t,t,row.company_id);const section=this.db.prepare(`INSERT INTO company_section_collection_state(company_id,section_name,status,last_attempted_at,error_message,updated_at) VALUES(?,?,'FAILED',?,?,?) ON CONFLICT(company_id,section_name) DO UPDATE SET status=CASE WHEN company_section_collection_state.status IN ('VERIFIED','CONFIRMED_EMPTY') THEN company_section_collection_state.status ELSE 'FAILED' END,last_attempted_at=excluded.last_attempted_at,error_message=excluded.error_message,updated_at=excluded.updated_at`);for(const name of ["basic_info","financial","executive","business_site","history","certification","designation"])section.run(row.company_id,name,t,message.slice(0,500),t)}this.event(row.collection_job_id,itemId,code==="ACCESS_RESTRICTED"?"ACCESS_RESTRICTED":"DETAIL_FAILED",message,"ERROR")}
- skip(itemId:string,code:string,message:string){const t=now();const row=this.db.prepare("SELECT collection_job_id FROM collection_items WHERE collection_item_id=?").get(itemId) as {collection_job_id:string};this.db.prepare("UPDATE collection_items SET status='SKIPPED',error_code=?,error_message=?,finished_at=?,updated_at=? WHERE collection_item_id=?").run(code,message.slice(0,500),t,t,itemId);this.event(row.collection_job_id,itemId,code,message,"INFO")}
+ skipDisclosureDenied(itemId:string,message:string){
+  const t=now();const operation="skipDisclosureDenied";
+  const row=this.db.prepare("SELECT collection_job_id,company_id,sminfo_kcd,company_name_snapshot FROM collection_items WHERE collection_item_id=?").get(itemId) as {collection_job_id:string;company_id?:string;sminfo_kcd:string;company_name_snapshot:string}|undefined;
+  if(!row)throw new Error(`DB_WRITE_FAILED operation=${operation} reason=COLLECTION_ITEM_NOT_FOUND item=${itemId}`);
+  this.db.exec("BEGIN IMMEDIATE");
+  try{
+   let companyId=row.company_id;
+   if(!companyId){
+    const existing=this.db.prepare("SELECT company_id FROM companies WHERE sminfo_kcd=?").get(row.sminfo_kcd) as {company_id:string}|undefined;
+    companyId=existing?.company_id??randomUUID();
+    this.db.prepare("INSERT OR IGNORE INTO companies(company_id,sminfo_kcd,company_name,first_collected_at,last_collected_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").run(companyId,row.sminfo_kcd,row.company_name_snapshot,t,t,t,t);
+   }
+   this.db.prepare(`INSERT INTO company_collection_state(company_id,collection_quality,collector_schema_version,first_seen_at,last_seen_at,last_collected_at,last_error_code,last_error_message,created_at,updated_at) VALUES(?,'UNKNOWN',?,?,?,?,?,?,?,?) ON CONFLICT(company_id) DO UPDATE SET last_seen_at=excluded.last_seen_at,last_collected_at=excluded.last_collected_at,last_error_code=excluded.last_error_code,last_error_message=excluded.last_error_message,updated_at=excluded.updated_at`).run(companyId,COLLECTOR_SCHEMA_VERSION,t,t,t,"DISCLOSURE_DENIED",message.slice(0,500),t,t);
+   this.db.prepare("UPDATE collection_items SET status='SKIPPED',company_id=?,error_code='DISCLOSURE_DENIED',error_message=?,finished_at=?,updated_at=? WHERE collection_item_id=?").run(companyId,message.slice(0,500),t,t,itemId);
+   this.db.prepare(`INSERT INTO company_disclosure_state(company_id,disclosure_status,confirmed_at,collection_item_id,collection_job_id,created_at,updated_at) VALUES(?,'DISCLOSURE_DENIED',?,?,?,?,?) ON CONFLICT(company_id) DO UPDATE SET disclosure_status='DISCLOSURE_DENIED',confirmed_at=excluded.confirmed_at,collection_item_id=excluded.collection_item_id,collection_job_id=excluded.collection_job_id,updated_at=excluded.updated_at`).run(companyId,t,itemId,row.collection_job_id,t,t);
+   this.event(row.collection_job_id,itemId,"DISCLOSURE_DENIED",message,"INFO");
+   this.db.exec("COMMIT");
+  }catch(error){this.db.exec("ROLLBACK");const reason=error instanceof Error?error.message:String(error);throw new Error(`DB_WRITE_FAILED operation=${operation} company=${row.company_name_snapshot} kcd=${row.sminfo_kcd} error=${reason}`)}
+ }
  stats(jobId:string){const row=this.db.prepare("SELECT COUNT(*) total,COALESCE(SUM(status='DONE'),0) completed,COALESCE(SUM(status='FAILED'),0) failed,COALESCE(SUM(status='PENDING'),0) pending,COALESCE(SUM(status='SKIPPED'),0) skipped FROM collection_items WHERE collection_job_id=?").get(jobId) as {total:number;completed:number;failed:number;pending:number;skipped:number};return row}
  jobStatus(id:string,status:string){const stats=this.stats(id),terminal=status==="COMPLETED"||status==="ERROR"||status==="STOPPED";this.db.prepare("UPDATE collection_jobs SET status=?,completed_count=?,failed_count=?,skipped_count=?,started_at=COALESCE(started_at,?),completed_at=CASE WHEN ? THEN ? ELSE completed_at END,updated_at=? WHERE collection_job_id=?").run(status,stats.completed,stats.failed,stats.skipped,now(),terminal?1:0,now(),now(),id);if(status==="PAUSED")this.event(id,undefined,"COLLECTION_PAUSED",`completed=${stats.completed}, failed=${stats.failed}`);if(terminal)this.event(id,undefined,"COLLECTION_COMPLETED",`status=${status}, completed=${stats.completed}, failed=${stats.failed}, skipped=${stats.skipped}`,status==="ERROR"?"ERROR":"INFO")}
  finishJob(id:string){const stats=this.stats(id);const status=stats.failed>0?"ERROR":"COMPLETED";this.jobStatus(id,status);return {status,...stats}}

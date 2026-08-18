@@ -20,7 +20,7 @@ const labels = {
   companyStatus: ["\uAE30\uC5C5\uC0C1\uD0DC", "\uC601\uC5C5\uC0C1\uD0DC"],
   establishedDate: ["\uC124\uB9BD\uC77C", "\uC124\uB9BD\uC77C\uC790"],
   address: ["\uC8FC\uC18C", "\uC9C0\uBC88\uC8FC\uC18C"],
-  roadAddress: ["\uB3C4\uB85C\uBA85\uC8FC\uC18C"],
+  roadAddress: ["\uB3C4\uB85C\uBA85\uC8FC\uC18C", "\uC8FC\uC18C(\uB3C4\uB85C\uBA85)"],
   homepage: ["\uD648\uD398\uC774\uC9C0", "\uD648\uD398\uC774\uC9C0URL"],
   mainProducts: ["\uC8FC\uC0DD\uC0B0\uD488", "\uC8FC\uC694\uC81C\uD488", "\uC8FC\uC694\uC0DD\uC0B0\uD488"],
   industryName: ["\uD45C\uC900\uC0B0\uC5C5", "\uC0B0\uC5C5\uBA85", "\uC8FC\uC5C5\uC885"],
@@ -37,15 +37,31 @@ const input = ($: CheerioAPI, ...names: string[]) => {
 
 function valueByLabel($: CheerioAPI, candidates: readonly string[]): string | undefined {
   let result: string | undefined;
-  $("th,dt,label").each((_, node) => {
+  $("th,td,dt").each((_, node) => {
     if (result) return;
     const label = clean($(node).text()).replace(/[\s:：]/g, "");
-    if (!candidates.some((candidate) => label.includes(candidate))) return;
-    const value = $(node).is("dt") ? $(node).next("dd").text() : $(node).next("td").text();
-    result = clean(value);
+    if (!candidates.some((candidate) => label === candidate)) return;
+    const valueNode = $(node).is("dt") ? $(node).next("dd") : $(node).next("td");
+    if (!valueNode.length || valueNode.find("select,option,input,textarea").length) return;
+    const value = clean(valueNode.text());
+    if (value && !isSearchUiContamination(value)) result = value;
   });
   return result || undefined;
 }
+
+function hasSearchControlByLabel($:CheerioAPI,candidates:readonly string[]){
+  return $("th,td,dt").toArray().some(node=>{
+    const label=clean($(node).text()).replace(/[\s:：]/g,"");
+    if(!candidates.some(candidate=>label===candidate))return false;
+    const valueNode=$(node).is("dt")?$(node).next("dd"):$(node).next("td");
+    return valueNode.find("select,option,input,textarea").length>0;
+  });
+}
+
+const searchUiTokens=["\uC870\uAC74\uC5C6\uC74C","\uC720\uAC00\uC99D\uAD8C\uC2DC\uC7A5","\uCF54\uC2A4\uB2E5\uC2DC\uC7A5","\uCF54\uB125\uC2A4","1\uAC1C\uC6D4\uB0B4","3\uAC1C\uC6D4\uB0B4","6\uAC1C\uC6D4\uB0B4"];
+export const isSearchUiContamination=(value:string|undefined)=>Boolean(value&&searchUiTokens.some(token=>value.includes(token)));
+const sourceValue=(value:string|undefined)=>value&&value!=="-"&&value!=="--"&&!isSearchUiContamination(value)?value:undefined;
+const validDate=(value:string|undefined)=>!value||/^\d{4}-\d{2}-\d{2}$/.test(value);
 
 const headerIndex = (headers: string[], names: string[]) =>
   headers.findIndex((header) => names.some((name) => header.replace(/\s/g, "").includes(name)));
@@ -125,12 +141,12 @@ export function parseCompanyDetail(html: string): CompanyDetail {
 
     const factoryNameAt = headerIndex(headers, ["\uACF5\uC7A5\uBA85"]);
     const factoryAddressAt = headerIndex(headers, ["\uC0AC\uC5C5\uC7A5\uC18C\uC7AC\uC9C0", "\uC18C\uC7AC\uC9C0", "\uACF5\uC7A5\uC8FC\uC18C"]);
-    if (factoryNameAt >= 0 || factoryAddressAt >= 0) {
+    if (factoryNameAt >= 0 && factoryAddressAt >= 0) {
       recognized.add("business_site");
       rows.each((__, row) => {
         const cells = $(row).find("td").map((___, cell) => clean($(cell).text())).get();
         const siteName=cells[factoryNameAt],siteAddress=cells[factoryAddressAt];
-        if (siteName&&siteAddress) businessSites.push({siteName,siteAddress});
+        if (siteName||siteAddress) businessSites.push({siteName:siteName||undefined,siteAddress:siteAddress||undefined});
       });
       return;
     }
@@ -139,7 +155,7 @@ export function parseCompanyDetail(html: string): CompanyDetail {
     const siteAddressAt = headerIndex(headers, ["사업장주소", "소재지", "주소"]);
     if (siteNameAt >= 0 || (sectionText.includes("사업장") && siteAddressAt >= 0)) {
       recognized.add("business_site");
-      rows.each((__, row) => { const cells=cellsFor(row); const siteName=cells[siteNameAt],siteAddress=cells[siteAddressAt];if(siteName&&siteAddress) businessSites.push({siteName,siteAddress}); });
+      rows.each((__, row) => { const cells=cellsFor(row); const siteName=cells[siteNameAt],siteAddress=cells[siteAddressAt];if(siteName||siteAddress) businessSites.push({siteName:siteName||undefined,siteAddress:siteAddress||undefined}); });
       return;
     }
 
@@ -181,29 +197,34 @@ export function parseCompanyDetail(html: string): CompanyDetail {
   // 사업장소재지 and preserve the source order.
   let pendingSiteName:string|undefined;
   $("tr").each((_,row)=>{
-    const cells=$(row).find("th,td").map((__,cell)=>clean($(cell).text())).get();
-    for(let index=0;index<cells.length;index++){
-      const label=(cells[index]??"").replace(/\s/g,"");const value=cells[index+1];
-      if(label.includes("\uACF5\uC7A5\uBA85")&&value){pendingSiteName=value;recognized.add("business_site");index++;continue;}
-      if(label.includes("\uC0AC\uC5C5\uC7A5\uC18C\uC7AC\uC9C0")&&value){recognized.add("business_site");if(pendingSiteName)businessSites.push({siteName:pendingSiteName,siteAddress:value});pendingSiteName=undefined;index++;}
-    }
+    const headers=$(row).children("th");
+    if(headers.length!==1)return;
+    const header=headers.first();
+    const label=clean(header.text()).replace(/\s/g,"");
+    const value=clean(header.next("td").text());
+    if(label.includes("\uACF5\uC7A5\uBA85")&&value){if(pendingSiteName)businessSites.push({siteName:pendingSiteName});pendingSiteName=value;recognized.add("business_site");return;}
+    if(label.includes("\uC0AC\uC5C5\uC7A5\uC18C\uC7AC\uC9C0")&&value){recognized.add("business_site");if(pendingSiteName)businessSites.push({siteName:pendingSiteName,siteAddress:value});pendingSiteName=undefined;}
   });
+  if(pendingSiteName)businessSites.push({siteName:pendingSiteName});
 
+  const rawCompanyType=valueByLabel($,labels.companyType);
+  const rawEstablishedDate=valueByLabel($,labels.establishedDate);
+  const rawSourceUpdatedAt=valueByLabel($,labels.sourceUpdatedAt);
   const parsed = {
     kcd: input($, "kcd", "kedCd") ?? "",
     companyName: input($, "comNm", "entrprsNm") ?? valueByLabel($, labels.companyName) ?? "",
     businessNumber: input($, "busiNo", "bizrno") ?? valueByLabel($, labels.businessNumber),
     representativeName: valueByLabel($, labels.representativeName),
-    companyType: valueByLabel($, labels.companyType),
+    companyType: sourceValue(rawCompanyType),
     companyStatus: valueByLabel($, labels.companyStatus),
-    establishedDate: valueByLabel($, labels.establishedDate),
+    establishedDate: sourceValue(rawEstablishedDate),
     address: valueByLabel($, labels.address),
     roadAddress: valueByLabel($, labels.roadAddress),
     homepage: valueByLabel($, labels.homepage),
     mainProducts: valueByLabel($, labels.mainProducts),
     ksicCode: input($, "ksic11BzcCd", "ksicCd"),
     industryName: input($, "ksic11BzcCdNm", "ksicNm") ?? valueByLabel($, labels.industryName),
-    sourceUpdatedAt:valueByLabel($,labels.sourceUpdatedAt),
+    sourceUpdatedAt:sourceValue(rawSourceUpdatedAt),
     financialStatements:unique(financialStatements),
     executives:unique(executives),
     businessSites:unique(businessSites),
@@ -224,6 +245,9 @@ export function parseCompanyDetail(html: string): CompanyDetail {
     return {status:"NOT_CHECKED",error:"SECTION_NOT_FOUND"};
   };
   const hasBasicIdentity=Boolean(parsed.companyName);
+  const basicValues=[parsed.companyName,parsed.representativeName,parsed.companyType,parsed.establishedDate,parsed.address,parsed.roadAddress,parsed.industryName,parsed.sourceUpdatedAt];
+  const unresolvedSearchCollision=(!rawCompanyType&&hasSearchControlByLabel($,labels.companyType))||(!rawEstablishedDate&&hasSearchControlByLabel($,labels.establishedDate));
+  const basicSanity=!unresolvedSearchCollision&&basicValues.every(value=>!isSearchUiContamination(value))&&validDate(parsed.establishedDate)&&validDate(parsed.sourceUpdatedAt)&&(!parsed.companyType||parsed.companyType.length<=80);
   const hasBasicFields=Boolean(parsed.businessNumber||parsed.representativeName||parsed.companyType||parsed.establishedDate||parsed.address||parsed.roadAddress||parsed.industryName);
   const financialHasValue=parsed.financialStatements.some(row=>row.totalAssets!==undefined||row.equity!==undefined||row.totalCapital!==undefined||row.revenue!==undefined||row.operatingIncome!==undefined||row.netIncome!==undefined);
   let financialStatus:SectionCollectionResult;
@@ -232,7 +256,7 @@ export function parseCompanyDetail(html: string): CompanyDetail {
   else if(recognized.has("financial")||hasHeading("financial"))financialStatus={status:"PARTIAL",error:"FINANCIAL_TABLE_OR_VALUES_NOT_FULLY_PARSED"};
   else financialStatus={status:"NOT_CHECKED",error:"FINANCIAL_SECTION_NOT_FOUND"};
   const sectionStatuses:Record<DetailSectionName,SectionCollectionResult>={
-    basic_info:hasBasicIdentity&&hasBasicFields?{status:"VERIFIED"}:{status:"PARTIAL",error:"BASIC_INFO_INCOMPLETE"},
+    basic_info:hasBasicIdentity&&hasBasicFields&&basicSanity?{status:"VERIFIED"}:{status:"PARTIAL",error:basicSanity?"BASIC_INFO_INCOMPLETE":"BASIC_INFO_SANITY_FAILED"},
     financial:financialStatus,
     executive:listStatus("executive",parsed.executives.length),
     business_site:listStatus("business_site",parsed.businessSites.length),

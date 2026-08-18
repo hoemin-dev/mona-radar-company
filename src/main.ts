@@ -12,6 +12,7 @@ interface CompanyRow {
   address?: string; roadAddress?: string; homepageUrl?: string; mainProducts?: string;
   ksicCode?: string; industryName?: string; fiscalYear?: number; totalAssetsKrwMillion?: number;
   revenueKrwMillion?: number; operatingIncomeKrwMillion?: number; netIncomeKrwMillion?: number;
+  disclosureStatus?: "DISCLOSURE_DENIED"; disclosureConfirmedAt?: string;
 }
 interface SearchResponse { rows: CompanyRow[]; total: number; page: number; totalPages: number; }
 interface CredentialStatus { saved: boolean; username?: string; credentialStatus?:string; }
@@ -132,7 +133,7 @@ const collector = () => `
 
 const resultCard = (row: CompanyRow) => `
   <article class="company-card" data-company-id="${escapeHtml(row.companyId)}" tabindex="0" role="button" aria-label="${escapeHtml(row.companyName)} 상세정보">
-    <div class="company-title"><div><b>${escapeHtml(row.companyName)}</b><small>${escapeHtml(row.businessNumber ?? row.sminfoKcd)}</small></div><span>${escapeHtml(row.companyStatus ?? "상태 미표시")}</span></div>
+    <div class="company-title"><div><b>${escapeHtml(row.companyName)}</b>${row.disclosureStatus==="DISCLOSURE_DENIED"?'<em class="disclosure-badge">정보비공개</em>':""}<small>${escapeHtml(row.businessNumber ?? row.sminfoKcd)}</small></div><span>${escapeHtml(row.companyStatus ?? "상태 미표시")}</span></div>
     <div class="company-grid">
       <dl><dt>대표자</dt><dd>${escapeHtml(row.representativeName ?? "—")}</dd><dt>기업형태</dt><dd>${escapeHtml(row.companyType ?? "—")}</dd><dt>설립일</dt><dd>${escapeHtml(row.establishedDate ?? "—")}</dd></dl>
       <dl><dt>업종</dt><dd>${escapeHtml(row.industryName ?? "—")}${row.ksicCode ? ` <small>${escapeHtml(row.ksicCode)}</small>` : ""}</dd><dt>주요제품</dt><dd>${escapeHtml(row.mainProducts ?? "—")}</dd><dt>주소</dt><dd>${escapeHtml(row.roadAddress ?? row.address ?? "—")}</dd></dl>
@@ -150,12 +151,12 @@ const pagination = () => {
 };
 
 const detailRows=(rows:Array<Record<string,unknown>>,columns:Array<[string,string]>)=>rows.length?`<div class="detail-table"><div class="detail-row detail-head">${columns.map(([,label])=>`<b>${label}</b>`).join("")}</div>${rows.map(row=>`<div class="detail-row">${columns.map(([key])=>`<span>${escapeHtml(row[key]??"—")}</span>`).join("")}</div>`).join("")}</div>`:'<div class="detail-empty">수집된 정보가 없습니다.</div>';
-const companyDetail=()=>{const d=selectedCompany!,c=d.company;return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COLLECTED COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)}</h2><p>${escapeHtml(c.businessNumber??c.sminfoKcd)} · 마지막 수집 ${escapeHtml(c.lastCollectedAt??"—")}</p></header><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>대표자</dt><dd>${escapeHtml(c.representativeName??"—")}</dd><dt>기업형태</dt><dd>${escapeHtml(c.companyType??"—")}</dd><dt>상태</dt><dd>${escapeHtml(c.companyStatus??"—")}</dd><dt>설립일</dt><dd>${escapeHtml(c.establishedDate??"—")}</dd><dt>정보수정일자</dt><dd>${escapeHtml(c.sourceUpdatedAt??"—")}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")} ${escapeHtml(c.ksicCode??"")}</dd><dt>주요제품</dt><dd>${escapeHtml(c.mainProducts??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.address??"—")}</dd><dt>도로명주소</dt><dd>${escapeHtml(c.roadAddress??"—")}</dd><dt>홈페이지</dt><dd>${escapeHtml(c.homepageUrl??"—")}</dd></dl></div></article><article class="detail-section"><h3>사업장정보</h3>${detailRows(d.businessSites,[["siteName","공장명"],["siteAddress","사업장소재지"]])}</article><article class="detail-section"><h3>연혁</h3>${detailRows(d.histories,[["sourceNumber","번호"],["eventDate","일자"],["description","내용"]])}</article><article class="detail-section"><h3>경영진</h3>${detailRows(d.executives,[["sourceNumber","번호"],["positionTitle","직위"],["maskedName","성명"]])}</article><article class="detail-section"><h3>매출현황</h3>${detailRows(d.financialStatements,[["fiscalYear","연도"],["totalAssets","자산총계"],["paidInCapital","납입자본금"],["totalEquity","자본총계"],["revenue","매출액"],["operatingIncome","영업이익"],["netIncome","당기순이익"]])}</article><article class="detail-section"><h3>인증</h3><h4>인증항목</h4>${detailRows(d.certifications,[["certificationNumber","인증번호"],["certificationName","인증명"],["certificationScope","인증범위"],["validityPeriod","유효기간"],["certificationAuthority","인증기관"]])}<h4>지정</h4>${detailRows(d.designations,[["designationNumber","지정번호"],["designationName","지정명"],["validityPeriod","유효기간"],["operatingAuthority","운영기관"]])}</article></section>`};
+const companyDetail=()=>{const d=selectedCompany!,c=d.company;if(c.disclosureStatus==="DISCLOSURE_DENIED")return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)} <em class="disclosure-badge">정보비공개</em></h2><p>${escapeHtml(c.sminfoKcd)} · 확인 ${escapeHtml(c.disclosureConfirmedAt??"—")}</p></header><article class="detail-section disclosure-notice"><h3>정보비공개</h3><p>SMINFO에서 업체 요청으로 상세정보가 공개되지 않습니다.</p></article><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>기업명</dt><dd>${escapeHtml(c.companyName)}</dd><dt>KCD</dt><dd>${escapeHtml(c.sminfoKcd)}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.roadAddress??c.address??"—")}</dd></dl></div></article></section>`;return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COLLECTED COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)}</h2><p>${escapeHtml(c.businessNumber??c.sminfoKcd)} · 마지막 수집 ${escapeHtml(c.lastCollectedAt??"—")}</p></header><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>대표자</dt><dd>${escapeHtml(c.representativeName??"—")}</dd><dt>기업형태</dt><dd>${escapeHtml(c.companyType??"—")}</dd><dt>상태</dt><dd>${escapeHtml(c.companyStatus??"—")}</dd><dt>설립일</dt><dd>${escapeHtml(c.establishedDate??"—")}</dd><dt>정보수정일자</dt><dd>${escapeHtml(c.sourceUpdatedAt??"—")}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")} ${escapeHtml(c.ksicCode??"")}</dd><dt>주요제품</dt><dd>${escapeHtml(c.mainProducts??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.address??"—")}</dd><dt>도로명주소</dt><dd>${escapeHtml(c.roadAddress??"—")}</dd><dt>홈페이지</dt><dd>${escapeHtml(c.homepageUrl??"—")}</dd></dl></div></article><article class="detail-section"><h3>사업장정보</h3>${detailRows(d.businessSites,[["siteName","공장명"],["siteAddress","사업장소재지"]])}</article><article class="detail-section"><h3>연혁</h3>${detailRows(d.histories,[["sourceNumber","번호"],["eventDate","일자"],["description","내용"]])}</article><article class="detail-section"><h3>경영진</h3>${detailRows(d.executives,[["sourceNumber","번호"],["positionTitle","직위"],["maskedName","성명"]])}</article><article class="detail-section"><h3>매출현황</h3>${detailRows(d.financialStatements,[["fiscalYear","연도"],["totalAssets","자산총계"],["paidInCapital","납입자본금"],["totalEquity","자본총계"],["revenue","매출액"],["operatingIncome","영업이익"],["netIncome","당기순이익"]])}</article><article class="detail-section"><h3>인증</h3><h4>인증항목</h4>${detailRows(d.certifications,[["certificationNumber","인증번호"],["certificationName","인증명"],["certificationScope","인증범위"],["validityPeriod","유효기간"],["certificationAuthority","인증기관"]])}<h4>지정</h4>${detailRows(d.designations,[["designationNumber","지정번호"],["designationName","지정명"],["validityPeriod","유효기간"],["operatingAuthority","운영기관"]])}</article></section>`};
 
 const search = () => selectedCompany ? companyDetail() : `
   <section class="page">
     <header><p class="eyebrow">LOCAL COMPANY INDEX</p><h2>Search</h2><p>가나다순 다음 ABC순으로 표시되며, 한 글자 입력부터 즉시 검색합니다.</p></header>
-    <div class="searchbar"><select id="industry-filter"><option value="">전체 업종</option>${targetOptions.map((x)=>`<option value="${escapeHtml(x.targetId)}" ${x.targetId===searchTargetId?"selected":""}>${escapeHtml(x.name)}</option>`).join("")}</select><input id="live-search" value="${escapeHtml(searchQuery)}" placeholder="기업명·대표자·사업자번호·제품·주소·업종 검색" autocomplete="off"><span id="search-count">${searchData.total.toLocaleString()}개 기업 · 페이지당 10개</span></div>
+    <div class="searchbar"><select id="industry-filter"><option value="">전체 업종</option>${targetOptions.map((x)=>`<option value="${escapeHtml(x.targetId)}" ${x.targetId===searchTargetId?"selected":""}>${escapeHtml(x.name)}</option>`).join("")}</select><div class="search-input-wrap"><input id="live-search" value="${escapeHtml(searchQuery)}" placeholder="기업명·대표자·사업자번호·제품·주소·업종 검색" autocomplete="off"><button id="clear-search" type="button" aria-label="검색어 지우기" ${searchQuery ? "" : "hidden"}>×</button></div><span id="search-count">${searchData.total.toLocaleString()}개 기업 · 페이지당 10개</span></div>
     <div id="search-error">${searchError ? `<div class="error">${escapeHtml(searchError)}</div>` : ""}</div>
     <div id="search-results" class="results company-results">${searchData.rows.length ? searchData.rows.map(resultCard).join("") : '<div class="empty">검색 결과가 없습니다.</div>'}</div>
     <div id="search-pagination">${pagination()}</div>
@@ -216,14 +217,20 @@ function scheduleSearch(value: string) {
 function bindSearch() {
   const input = document.querySelector<HTMLInputElement>("#live-search");
   if (!input) return;
+  const clear = document.querySelector<HTMLButtonElement>("#clear-search");
+  const updateClearVisibility=()=>{if(clear)clear.hidden=input.value.length===0;};
   document.querySelector<HTMLSelectElement>("#industry-filter")?.addEventListener("change",(event)=>{searchTargetId=(event.target as HTMLSelectElement).value;void loadSearch(1);});
   input.addEventListener("compositionupdate", () => { scheduleSearch(input.value); });
   input.addEventListener("compositionend", () => {
+    updateClearVisibility();
     scheduleSearch(input.value);
   });
   input.addEventListener("input", () => {
+    updateClearVisibility();
     scheduleSearch(input.value);
   });
+  clear?.addEventListener("pointerdown",event=>event.preventDefault());
+  clear?.addEventListener("click",()=>{window.clearTimeout(searchTimer);input.value="";searchQuery="";updateClearVisibility();input.focus();void loadSearch(1);});
   bindPagination();
 }
 
