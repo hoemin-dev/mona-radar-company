@@ -3,6 +3,7 @@ import "./search.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { CollectorStatus } from "./shared/types";
 
 type View = "collector" | "search" | "dash" | "analysis";
@@ -24,6 +25,7 @@ interface CompanyFullDetail { company: CompanyRow & { lastCollectedAt?:string; s
 const app = document.querySelector<HTMLDivElement>("#app")!;
 let view: View = "collector";
 let status: CollectorStatus = "IDLE";
+let collectorStatusMessage = "";
 let currentCompany = "수집 대기";
 let lastCollectedCompany = "—";
 let countdown = "—";
@@ -47,11 +49,51 @@ let industrySearchSequence=0;
 let targetOptions: TargetOption[] = [];
 let searchTargetId = "";
 let selectedCompany: CompanyFullDetail | undefined;
+type FinancialUnit = "million" | "eok";
+let financialUnit: FinancialUnit = "million";
 
 const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[char]!));
 const amount = (value?: number) => value === undefined || value === null ? "—" : `${value.toLocaleString()}백만원`;
+const financialKeys = new Set(["totalAssets", "paidInCapital", "totalEquity", "revenue", "operatingIncome", "netIncome"]);
+const formatFinancialAmount = (value: unknown) => {
+  if (value === null || value === undefined) return "—";
+  if (value === "") return "";
+  const numeric = typeof value === "number" ? value : Number(String(value).replaceAll(",", ""));
+  if (!Number.isFinite(numeric)) return String(value);
+  return financialUnit === "million"
+    ? numeric.toLocaleString("en-US", { maximumFractionDigits: 0 })
+    : (numeric / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+const normalizeHomepageUrl = (value?: string) => {
+  const homepage = value?.trim();
+  if (!homepage) return undefined;
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(homepage) && !/^https?:\/\//i.test(homepage)) return undefined;
+  const candidate = /^https?:\/\//i.test(homepage) ? homepage : `https://${homepage}`;
+  try {
+    const url = new URL(candidate);
+    return (url.protocol === "http:" || url.protocol === "https:") && url.hostname ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const homepageLink = (value?: string) => {
+  const url = normalizeHomepageUrl(value);
+  return url ? `<a class="homepage" href="${escapeHtml(url)}" data-homepage-url="${escapeHtml(url)}" title="홈페이지" rel="noreferrer">${escapeHtml(value!.trim())}</a>` : "";
+};
+const openHomepage = async (value?: string) => {
+  const url = normalizeHomepageUrl(value);
+  if (!url) {
+    console.error("홈페이지 URL이 유효하지 않습니다.", value);
+    return;
+  }
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error(`기본 브라우저로 홈페이지를 열지 못했습니다: ${url}`, error);
+  }
+};
 
 async function copyLogs(){
   const text=logs.join("\r\n");
@@ -116,14 +158,14 @@ const collector = () => `
     <div class="guide"><b>자동 순서</b><span>1. 세션 확인</span><span>2. 필요 시 자동 로그인</span><span>3. Target 업종 검색</span><span>4. 기업 수집</span></div>
     <div class="status-grid">
       <article><span>브라우저</span><strong>${status === "IDLE" ? "닫힘" : "실행 중"}</strong><small>로그인 프로필 유지</small></article>
-      <article><span>SMINFO 상태</span><strong>${status}</strong><small>${status === "READY" ? "수집 가능" : "브라우저 상태를 확인하세요"}</small></article>
+      <article><span>SMINFO 상태</span><strong>${status}</strong><small>${escapeHtml(collectorStatusMessage || (status === "READY" ? "수집 가능" : "브라우저 상태를 확인하세요"))}</small></article>
       <article><span>현재 기업</span><strong>${escapeHtml(currentCompany)}</strong><small>처리 중 · 최근 저장 ${escapeHtml(lastCollectedCompany)}</small></article>
       <article><span>다음 조회</span><strong id="countdown-value">${countdown}</strong><small>35–40초 간격</small></article>
     </div>
     <div class="workspace">
       <div class="actions">
-        <button class="primary" data-action="start" ${!selectedIndustry || !credential.saved || editingCredential || ["BROWSER_STARTING", "WAITING_FOR_BROWSER", "RUNNING", "COLLECTING", "PAUSED", "LOGIN_IN_PROGRESS", "LOGIN_CHECKING", "INDUSTRY_SEARCHING", "COMPANY_SEARCHING", "RECOVERING", "LOGIN_FAILED", "CREDENTIAL_REQUIRED"].includes(status) ? "disabled" : ""}>수집 시작</button>
-        <button data-action="pause" ${status !== "RUNNING" ? "disabled" : ""}>일시정지</button>
+        <button class="primary" data-action="start" ${!selectedIndustry || !credential.saved || editingCredential || ["BROWSER_STARTING", "WAITING_FOR_BROWSER", "RUNNING", "COLLECTING", "PAUSED", "LOGIN_IN_PROGRESS", "LOGIN_CHECKING", "INDUSTRY_SEARCHING", "COMPANY_SEARCHING", "RECOVERING", "RECOVERY_COOLDOWN", "LOGIN_FAILED", "CREDENTIAL_REQUIRED"].includes(status) ? "disabled" : ""}>수집 시작</button>
+        <button data-action="pause" ${status !== "RUNNING" && status !== "RECOVERING" && status !== "RECOVERY_COOLDOWN" ? "disabled" : ""}>일시정지</button>
         <button data-action="resume" ${status !== "PAUSED" ? "disabled" : ""}>재개</button>
         <button data-action="stop" ${status === "IDLE" ? "disabled" : ""}>중단</button>
       </div>
@@ -133,13 +175,13 @@ const collector = () => `
 
 const resultCard = (row: CompanyRow) => `
   <article class="company-card" data-company-id="${escapeHtml(row.companyId)}" tabindex="0" role="button" aria-label="${escapeHtml(row.companyName)} 상세정보">
-    <div class="company-title"><div><b>${escapeHtml(row.companyName)}</b>${row.disclosureStatus==="DISCLOSURE_DENIED"?'<em class="disclosure-badge">정보비공개</em>':""}<small>${escapeHtml(row.businessNumber ?? row.sminfoKcd)}</small></div><span>${escapeHtml(row.companyStatus ?? "상태 미표시")}</span></div>
+    <div class="company-title"><div><b>${escapeHtml(row.companyName)}</b><small>${escapeHtml(row.businessNumber ?? "사업자번호 없음")}</small></div>${row.disclosureStatus==="DISCLOSURE_DENIED"?'<span>정보 비공개</span>':row.companyStatus?`<span>${escapeHtml(row.companyStatus)}</span>`:""}</div>
     <div class="company-grid">
       <dl><dt>대표자</dt><dd>${escapeHtml(row.representativeName ?? "—")}</dd><dt>기업형태</dt><dd>${escapeHtml(row.companyType ?? "—")}</dd><dt>설립일</dt><dd>${escapeHtml(row.establishedDate ?? "—")}</dd></dl>
       <dl><dt>업종</dt><dd>${escapeHtml(row.industryName ?? "—")}${row.ksicCode ? ` <small>${escapeHtml(row.ksicCode)}</small>` : ""}</dd><dt>주요제품</dt><dd>${escapeHtml(row.mainProducts ?? "—")}</dd><dt>주소</dt><dd>${escapeHtml(row.roadAddress ?? row.address ?? "—")}</dd></dl>
       <dl class="financial"><dt>최근 결산</dt><dd>${escapeHtml(row.fiscalYear ?? "—")}</dd><dt>매출액</dt><dd>${amount(row.revenueKrwMillion)}</dd><dt>영업이익</dt><dd>${amount(row.operatingIncomeKrwMillion)}</dd><dt>당기순이익</dt><dd>${amount(row.netIncomeKrwMillion)}</dd></dl>
     </div>
-    ${row.homepageUrl ? `<a class="homepage" href="${escapeHtml(row.homepageUrl)}" target="_blank" rel="noreferrer">${escapeHtml(row.homepageUrl)}</a>` : ""}
+    ${homepageLink(row.homepageUrl)}
   </article>`;
 
 const pagination = () => {
@@ -150,8 +192,19 @@ const pagination = () => {
   return `<nav class="pagination-controls"><button data-page="${searchData.page - 1}" ${searchData.page <= 1 ? "disabled" : ""}>이전</button>${pages.map((page) => `<button data-page="${page}" class="${page === searchData.page ? "active" : ""}">${page}</button>`).join("")}<button data-page="${searchData.page + 1}" ${searchData.page >= searchData.totalPages ? "disabled" : ""}>다음</button></nav>`;
 };
 
-const detailRows=(rows:Array<Record<string,unknown>>,columns:Array<[string,string]>)=>rows.length?`<div class="detail-table"><div class="detail-row detail-head">${columns.map(([,label])=>`<b>${label}</b>`).join("")}</div>${rows.map(row=>`<div class="detail-row">${columns.map(([key])=>`<span>${escapeHtml(row[key]??"—")}</span>`).join("")}</div>`).join("")}</div>`:'<div class="detail-empty">수집된 정보가 없습니다.</div>';
-const companyDetail=()=>{const d=selectedCompany!,c=d.company;if(c.disclosureStatus==="DISCLOSURE_DENIED")return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)} <em class="disclosure-badge">정보비공개</em></h2><p>${escapeHtml(c.sminfoKcd)} · 확인 ${escapeHtml(c.disclosureConfirmedAt??"—")}</p></header><article class="detail-section disclosure-notice"><h3>정보비공개</h3><p>SMINFO에서 업체 요청으로 상세정보가 공개되지 않습니다.</p></article><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>기업명</dt><dd>${escapeHtml(c.companyName)}</dd><dt>KCD</dt><dd>${escapeHtml(c.sminfoKcd)}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.roadAddress??c.address??"—")}</dd></dl></div></article></section>`;return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COLLECTED COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)}</h2><p>${escapeHtml(c.businessNumber??c.sminfoKcd)} · 마지막 수집 ${escapeHtml(c.lastCollectedAt??"—")}</p></header><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>대표자</dt><dd>${escapeHtml(c.representativeName??"—")}</dd><dt>기업형태</dt><dd>${escapeHtml(c.companyType??"—")}</dd><dt>상태</dt><dd>${escapeHtml(c.companyStatus??"—")}</dd><dt>설립일</dt><dd>${escapeHtml(c.establishedDate??"—")}</dd><dt>정보수정일자</dt><dd>${escapeHtml(c.sourceUpdatedAt??"—")}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")} ${escapeHtml(c.ksicCode??"")}</dd><dt>주요제품</dt><dd>${escapeHtml(c.mainProducts??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.address??"—")}</dd><dt>도로명주소</dt><dd>${escapeHtml(c.roadAddress??"—")}</dd><dt>홈페이지</dt><dd>${escapeHtml(c.homepageUrl??"—")}</dd></dl></div></article><article class="detail-section"><h3>사업장정보</h3>${detailRows(d.businessSites,[["siteName","공장명"],["siteAddress","사업장소재지"]])}</article><article class="detail-section"><h3>연혁</h3>${detailRows(d.histories,[["sourceNumber","번호"],["eventDate","일자"],["description","내용"]])}</article><article class="detail-section"><h3>경영진</h3>${detailRows(d.executives,[["sourceNumber","번호"],["positionTitle","직위"],["maskedName","성명"]])}</article><article class="detail-section"><h3>매출현황</h3>${detailRows(d.financialStatements,[["fiscalYear","연도"],["totalAssets","자산총계"],["paidInCapital","납입자본금"],["totalEquity","자본총계"],["revenue","매출액"],["operatingIncome","영업이익"],["netIncome","당기순이익"]])}</article><article class="detail-section"><h3>인증</h3><h4>인증항목</h4>${detailRows(d.certifications,[["certificationNumber","인증번호"],["certificationName","인증명"],["certificationScope","인증범위"],["validityPeriod","유효기간"],["certificationAuthority","인증기관"]])}<h4>지정</h4>${detailRows(d.designations,[["designationNumber","지정번호"],["designationName","지정명"],["validityPeriod","유효기간"],["operatingAuthority","운영기관"]])}</article></section>`};
+const detailRows=(rows:Array<Record<string,unknown>>,columns:Array<[string,string]>)=>{
+  const isFinancialTable=columns.some(([key])=>financialKeys.has(key));
+  const unitToggle=isFinancialTable?`<div class="financial-unit-row"><div class="unit-toggle" role="group" aria-label="재무 단위"><button type="button" data-financial-unit="million" class="${financialUnit==="million"?"active":""}" aria-pressed="${financialUnit==="million"}">백만원</button><button type="button" data-financial-unit="eok" class="${financialUnit==="eok"?"active":""}" aria-pressed="${financialUnit==="eok"}">억원</button></div></div>`:"";
+  if(!rows.length)return `${unitToggle}<div class="detail-empty">수집된 정보가 없습니다.</div>`;
+  const cell=(row:Record<string,unknown>,key:string)=>{
+    const value=row[key];
+    if(!isFinancialTable||!financialKeys.has(key))return `<span>${escapeHtml(value??"—")}</span>`;
+    const rawValue=value===null||value===undefined?'data-financial-null':`data-financial-value="${escapeHtml(value)}"`;
+    return `<span ${rawValue}>${escapeHtml(formatFinancialAmount(value))}</span>`;
+  };
+  return `${unitToggle}<div class="detail-table"><div class="detail-row detail-head">${columns.map(([,label])=>`<b>${label}</b>`).join("")}</div>${rows.map(row=>`<div class="detail-row">${columns.map(([key])=>cell(row,key)).join("")}</div>`).join("")}</div>`;
+};
+const companyDetail=()=>{const d=selectedCompany!,c=d.company;if(c.disclosureStatus==="DISCLOSURE_DENIED")return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)} <em class="disclosure-badge">정보비공개</em></h2><p>${escapeHtml(c.sminfoKcd)} · 확인 ${escapeHtml(c.disclosureConfirmedAt??"—")}</p></header><article class="detail-section disclosure-notice"><h3>정보비공개</h3><p>SMINFO에서 업체 요청으로 상세정보가 공개되지 않습니다.</p></article><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>기업명</dt><dd>${escapeHtml(c.companyName)}</dd><dt>KCD</dt><dd>${escapeHtml(c.sminfoKcd)}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.roadAddress??c.address??"—")}</dd></dl></div></article></section>`;return `<section class="page company-detail-page"><button class="detail-back" data-action="back_to_search">← Search로 돌아가기</button><header><p class="eyebrow">COLLECTED COMPANY DETAIL</p><h2>${escapeHtml(c.companyName)}</h2><p>${escapeHtml(c.businessNumber??"사업자번호 없음")} · 마지막 수집 ${escapeHtml(c.lastCollectedAt??"—")}</p></header><article class="detail-section"><h3>기본정보</h3><div class="detail-facts"><dl><dt>대표자</dt><dd>${escapeHtml(c.representativeName??"—")}</dd><dt>기업형태</dt><dd>${escapeHtml(c.companyType??"—")}</dd><dt>상태</dt><dd>${escapeHtml(c.companyStatus??"—")}</dd><dt>설립일</dt><dd>${escapeHtml(c.establishedDate??"—")}</dd><dt>정보수정일자</dt><dd>${escapeHtml(c.sourceUpdatedAt??"—")}</dd></dl><dl><dt>업종</dt><dd>${escapeHtml(c.industryName??"—")} ${escapeHtml(c.ksicCode??"")}</dd><dt>주요제품</dt><dd>${escapeHtml(c.mainProducts??"—")}</dd><dt>주소</dt><dd>${escapeHtml(c.address??"—")}</dd><dt>도로명주소</dt><dd>${escapeHtml(c.roadAddress??"—")}</dd><dt>홈페이지</dt><dd>${homepageLink(c.homepageUrl)||"—"}</dd></dl></div></article><article class="detail-section"><h3>사업장정보</h3>${detailRows(d.businessSites,[["siteName","공장명"],["siteAddress","사업장소재지"]])}</article><article class="detail-section"><h3>연혁</h3>${detailRows(d.histories,[["sourceNumber","번호"],["eventDate","일자"],["description","내용"]])}</article><article class="detail-section"><h3>경영진</h3>${detailRows(d.executives,[["sourceNumber","번호"],["positionTitle","직위"],["maskedName","성명"]])}</article><article class="detail-section"><h3>매출현황</h3>${detailRows(d.financialStatements,[["fiscalYear","연도"],["totalAssets","자산총계"],["paidInCapital","납입자본금"],["totalEquity","자본총계"],["revenue","매출액"],["operatingIncome","영업이익"],["netIncome","당기순이익"]])}</article><article class="detail-section"><h3>인증</h3><h4>인증항목</h4>${detailRows(d.certifications,[["certificationNumber","인증번호"],["certificationName","인증명"],["certificationScope","인증범위"],["validityPeriod","유효기간"],["certificationAuthority","인증기관"]])}<h4>지정</h4>${detailRows(d.designations,[["designationNumber","지정번호"],["designationName","지정명"],["validityPeriod","유효기간"],["operatingAuthority","운영기관"]])}</article></section>`};
 
 const search = () => selectedCompany ? companyDetail() : `
   <section class="page">
@@ -187,8 +240,26 @@ function bindPagination() {
 
 function bindCompanyDetails(){
   document.querySelector<HTMLElement>("[data-action=back_to_search]")?.addEventListener("click",()=>{selectedCompany=undefined;render();void loadSearch(searchData.page);});
+  document.querySelectorAll<HTMLButtonElement>("[data-financial-unit]").forEach(button=>button.addEventListener("click",()=>{
+    const unit=button.dataset.financialUnit;
+    if((unit!=="million"&&unit!=="eok")||unit===financialUnit)return;
+    financialUnit=unit;
+    document.querySelectorAll<HTMLElement>("[data-financial-value],[data-financial-null]").forEach(cell=>{
+      cell.textContent=formatFinancialAmount(cell.hasAttribute("data-financial-null")?undefined:cell.dataset.financialValue);
+    });
+    document.querySelectorAll<HTMLButtonElement>("[data-financial-unit]").forEach(unitButton=>{
+      const active=unitButton.dataset.financialUnit===financialUnit;
+      unitButton.classList.toggle("active",active);
+      unitButton.setAttribute("aria-pressed",String(active));
+    });
+  }));
+  document.querySelectorAll<HTMLAnchorElement>("[data-homepage-url]").forEach(link=>link.addEventListener("click",event=>{
+    event.preventDefault();
+    event.stopPropagation();
+    void openHomepage(link.dataset.homepageUrl);
+  }));
   document.querySelectorAll<HTMLElement>("[data-company-id]").forEach(card=>{
-    const open=async()=>{try{selectedCompany=await invoke<CompanyFullDetail>("get_company_detail",{companyId:card.dataset.companyId});render();}catch(error){searchError=`상세정보 오류: ${String(error)}`;updateSearchResults();}};
+    const open=async()=>{try{selectedCompany=await invoke<CompanyFullDetail>("get_company_detail",{companyId:card.dataset.companyId});financialUnit="million";render();}catch(error){searchError=`상세정보 오류: ${String(error)}`;updateSearchResults();}};
     card.addEventListener("click",()=>void open());
     card.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();void open();}});
   });
@@ -324,7 +395,7 @@ try{const saved=localStorage.getItem("mona-selected-industry");if(saved){const v
 void listen<Record<string,unknown>>("industry-event",event=>{const data=event.payload;industryRefreshRunning=String(data.status)==="RUNNING";logs.push(`${new Date().toLocaleTimeString()} industry ${String(data.message??data.status??"")}`);if(String(data.status)==="COMPLETED")void invoke<IndustryMasterStatus>("industry_master_status").then(value=>{industryStatus=value;industryOptions=[];if(view==="collector")render()});else if(view==="collector")renderPreservingScroll()});
 void listen<Record<string, unknown>>("collector-event", (event) => {
   const data = event.payload;
-  if (data.type === "status") { status = String(data.status) as CollectorStatus; if(status === "CREDENTIAL_REQUIRED") { editingCredential=true; loggedIn=false; sessionStatus="LOGGED_OUT"; } }
+  if (data.type === "status") { status = String(data.status) as CollectorStatus; collectorStatusMessage=String(data.message??""); if(status === "CREDENTIAL_REQUIRED") { editingCredential=true; loggedIn=false; sessionStatus="LOGGED_OUT"; } }
   if (data.type === "status"&&data.companyName) currentCompany=String(data.companyName);
   if (data.type === "company_collected") {lastCollectedCompany=String(data.companyName);currentCompany="다음 기업 대기";}
   if(data.type==="company_skipped"){lastCollectedCompany=`${String(data.companyName??currentCompany)} (건너뜀)`;currentCompany="다음 기업 대기";}

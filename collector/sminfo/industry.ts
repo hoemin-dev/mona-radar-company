@@ -4,6 +4,7 @@ import {SMINFO} from "./constants.js";
 import {inspectBrowserState} from "./session.js";
 import {restoreSearchPage} from "../browser/search-page-recovery.js";
 import {readVisiblePageNumber} from "../browser/navigation-test.js";
+import {HardRecoveryRequired} from "../hard-recovery.js";
 
 export interface IndustryCandidate { code?: string; name: string }
 const clean = (value:string) => value.replace(/\s+/g," ").trim();
@@ -61,7 +62,9 @@ async function choose(row:Locator,page:Page) {
 export async function resolveIndustry(page:Page,target:string,emit:(event:unknown)=>void,preferredCode?:string):Promise<IndustryCandidate>{
   const before=new Set(page.context().pages());
   let lookup:Page|undefined;
-  for(const candidate of page.context().pages().filter(candidate=>candidate!==page&&!candidate.isClosed())){
+  const existing=page.context().pages().filter(candidate=>candidate!==page&&!candidate.isClosed());
+  if(existing.length>1)throw new HardRecoveryRequired(`INDUSTRY_POPUP_ACCUMULATED count=${existing.length}`);
+  for(const candidate of existing){
     if(await visibleTextInput(candidate).then(()=>true).catch(()=>false)){lookup=candidate;break}
   }
   if(!lookup){
@@ -69,11 +72,18 @@ export async function resolveIndustry(page:Page,target:string,emit:(event:unknow
     await page.getByText("산업코드찾기",{exact:true}).filter({visible:true}).first().click();
     const popup=await popupPromise;
     lookup=popup??page.context().pages().find(x=>!before.has(x))??page;
+    if(lookup===page)throw new HardRecoveryRequired("INDUSTRY_POPUP_NOT_OPENED");
   }
   await lookup.waitForLoadState("domcontentloaded").catch(()=>undefined);
-  const input=await visibleTextInput(lookup);
-  await input.fill(target);
-  await clickExactButton(lookup,"검색");
+  const popupDeadline=Date.now()+10_000;let input:Locator|undefined;
+  while(Date.now()<popupDeadline&&!lookup.isClosed()){
+    input=await visibleTextInput(lookup).catch(()=>undefined);
+    if(input)break;
+    await lookup.waitForTimeout(250);
+  }
+  if(!input)throw new HardRecoveryRequired(`INDUSTRY_POPUP_EMPTY_OR_STUCK url=${lookup.url()}`);
+  try{await input.fill(target);await clickExactButton(lookup,"검색");}
+  catch(error){throw new HardRecoveryRequired(`INDUSTRY_POPUP_SEARCH_FAILED ${error instanceof Error?error.message:String(error)}`)}
   await lookup.waitForTimeout(500);
   const candidates=await readCandidates(lookup,target);
   emit({type:"industry_candidates",target,candidates:candidates.map(x=>x.candidate),message:`Industry candidates found: ${candidates.length}`});
@@ -83,8 +93,9 @@ export async function resolveIndustry(page:Page,target:string,emit:(event:unknow
   const selectable=byCode.length===1?byCode:exact.length===1?exact:candidates.length===1?candidates:[];
   if(selectable.length!==1) throw new Error(`INDUSTRY_SELECTION_REQUIRED candidates=${JSON.stringify(candidates.map(x=>x.candidate))}`);
   const closePromise=lookup!==page?lookup.waitForEvent("close",{timeout:10_000}).catch(()=>undefined):undefined;
-  await choose(selectable[0]!.row,lookup);
-  if(closePromise) await closePromise;
+  try{await choose(selectable[0]!.row,lookup);}
+  catch(error){throw new HardRecoveryRequired(`INDUSTRY_POPUP_SELECTION_FAILED ${error instanceof Error?error.message:String(error)}`)}
+  if(closePromise){await closePromise;if(!lookup.isClosed())throw new HardRecoveryRequired(`INDUSTRY_POPUP_CLOSE_FAILED url=${lookup.url()}`);}
   await page.bringToFront();
   emit({type:"industry_resolved",target,industryName:selectable[0]!.candidate.name,industryCode:selectable[0]!.candidate.code,message:`Industry selected: ${selectable[0]!.candidate.name} (${selectable[0]!.candidate.code??"code unavailable"})`});
   return selectable[0]!.candidate;

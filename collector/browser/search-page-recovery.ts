@@ -2,6 +2,7 @@ import type {Page} from "playwright";
 import {readVisiblePageNumber} from "./navigation-test.js";
 import {SMINFO} from "../sminfo/constants.js";
 import {SMINFO_SELECTORS} from "../sminfo/selectors.js";
+import {beforePagination} from "./pagination-interval.js";
 
 type Emit=(event:unknown)=>void;
 interface PaginationControl {text:string;target:number}
@@ -40,7 +41,7 @@ export async function restoreSearchPage(page:Page,targetPage:number,emit:Emit,ma
         const candidates=await clickable.all();let selected=undefined as typeof candidates[number]|undefined;
         for(const candidate of candidates){const onclick=await candidate.getAttribute("onclick");if(new RegExp(`searchByTarget\\(\\s*['\"]?${action.target}(?:['\"])?\\s*\\)`).test(onclick??"")){selected=candidate;break}}
         if(!selected)throw new Error(`PAGINATION_CONTROL_NOT_FOUND target=${action.target}`);
-        const before=state.current;await selected.click();
+        const before=state.current;await beforePagination(page);await selected.click();
         const deadline=Date.now()+30_000;let rows=0;
         do{
           await page.waitForLoadState("domcontentloaded").catch(()=>undefined);

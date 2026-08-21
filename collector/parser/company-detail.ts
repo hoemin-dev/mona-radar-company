@@ -248,7 +248,6 @@ export function parseCompanyDetail(html: string): CompanyDetail {
   const basicValues=[parsed.companyName,parsed.representativeName,parsed.companyType,parsed.establishedDate,parsed.address,parsed.roadAddress,parsed.industryName,parsed.sourceUpdatedAt];
   const unresolvedSearchCollision=(!rawCompanyType&&hasSearchControlByLabel($,labels.companyType))||(!rawEstablishedDate&&hasSearchControlByLabel($,labels.establishedDate));
   const basicSanity=!unresolvedSearchCollision&&basicValues.every(value=>!isSearchUiContamination(value))&&validDate(parsed.establishedDate)&&validDate(parsed.sourceUpdatedAt)&&(!parsed.companyType||parsed.companyType.length<=80);
-  const hasBasicFields=Boolean(parsed.businessNumber||parsed.representativeName||parsed.companyType||parsed.establishedDate||parsed.address||parsed.roadAddress||parsed.industryName);
   const financialHasValue=parsed.financialStatements.some(row=>row.totalAssets!==undefined||row.equity!==undefined||row.totalCapital!==undefined||row.revenue!==undefined||row.operatingIncome!==undefined||row.netIncome!==undefined);
   let financialStatus:SectionCollectionResult;
   if(parsed.financialStatements.length&&financialHasValue)financialStatus={status:"VERIFIED"};
@@ -256,7 +255,7 @@ export function parseCompanyDetail(html: string): CompanyDetail {
   else if(recognized.has("financial")||hasHeading("financial"))financialStatus={status:"PARTIAL",error:"FINANCIAL_TABLE_OR_VALUES_NOT_FULLY_PARSED"};
   else financialStatus={status:"NOT_CHECKED",error:"FINANCIAL_SECTION_NOT_FOUND"};
   const sectionStatuses:Record<DetailSectionName,SectionCollectionResult>={
-    basic_info:hasBasicIdentity&&hasBasicFields&&basicSanity?{status:"VERIFIED"}:{status:"PARTIAL",error:basicSanity?"BASIC_INFO_INCOMPLETE":"BASIC_INFO_SANITY_FAILED"},
+    basic_info:hasBasicIdentity&&basicSanity?{status:"VERIFIED"}:{status:"PARTIAL",error:basicSanity?"BASIC_INFO_IDENTITY_MISSING":"BASIC_INFO_SANITY_FAILED"},
     financial:financialStatus,
     executive:listStatus("executive",parsed.executives.length),
     business_site:listStatus("business_site",parsed.businessSites.length),
@@ -264,7 +263,9 @@ export function parseCompanyDetail(html: string): CompanyDetail {
     certification:listStatus("certification",parsed.certifications.length),
     designation:listStatus("designation",parsed.designations.length),
   };
-  const acceptable=new Set(["VERIFIED","CONFIRMED_EMPTY"]);
-  const collectionQuality=Object.values(sectionStatuses).every(result=>acceptable.has(result.status))?"VERIFIED":"PARTIAL";
+  // Optional fields and sections may legitimately be blank or undisclosed.
+  // A parsed detail is fresh when its identity exists and its basic values pass
+  // sanity checks; per-section statuses continue to describe data completeness.
+  const collectionQuality=sectionStatuses.basic_info.status==="VERIFIED"?"VERIFIED":"PARTIAL";
   return {...parsed,sectionStatuses,collectionQuality};
 }

@@ -19,6 +19,12 @@ describe("SMINFO semantic parsers", () => {
     expect(result.establishedDate).toBeUndefined();
     expect(result.sectionStatuses.basic_info).toMatchObject({status:"PARTIAL",error:"BASIC_INFO_SANITY_FAILED"});
   });
+  it("verifies a sane detail identity even when every optional field and section is absent",()=>{
+    const result=parseCompanyDetail(`<input name="kcd" value="sparse"><input name="comNm" value="공개정보 없음">`);
+    expect(result).toMatchObject({businessNumber:undefined,representativeName:undefined,address:undefined,collectionQuality:"VERIFIED"});
+    expect(result.sectionStatuses.basic_info.status).toBe("VERIFIED");
+    expect(result.sectionStatuses.financial.status).toBe("NOT_CHECKED");
+  });
   it("reads search totals, pages and company identifiers", () => {
     const result = parseSearchResult(fixture("search-result.html"));
     expect(result.total).toBeGreaterThan(0);

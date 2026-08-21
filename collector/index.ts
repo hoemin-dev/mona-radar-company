@@ -14,8 +14,9 @@ import { collectCurrentSearch } from "./collector.js";
 import { CollectorControl } from "./control.js";
 import { Repository } from "./database/repository.js";
 import { ensureLoggedIn } from "./sminfo/session.js";
-import { resolveIndustry, runCompanySearchWithRepair } from "./sminfo/industry.js";
+import { resolveIndustry, runCompanySearchWithRepair, type IndustryCandidate } from "./sminfo/industry.js";
 import { refreshIndustryMaster } from "./industry-master.js";
+import {requiresHardRecovery} from "./hard-recovery.js";
 
 const emit = (event: unknown) => process.stdout.write(`${JSON.stringify(event)}\n`);
 const appData = process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming");
@@ -33,7 +34,7 @@ if(process.argv.includes("--industry-refresh")){
 
 emit({ type: "status", status: "WAITING_FOR_BROWSER", message: "Opening SMINFO browser" });
 const control = new CollectorControl((status, message) => emit({ type: "status", status, message }));
-const { context, page } = await openPersistentSminfo(profile, emit);
+let browser = await openPersistentSminfo(profile, emit);
 emit({ type: "status", status: "READY", message: "Collector browser is ready" });
 
 while (true) {
@@ -41,7 +42,7 @@ while (true) {
   if(queued.action === "shutdown")break;
   if (queued.action === "nav_test") {
     try {
-      await runNavigationTest(page, emit);
+      await runNavigationTest(browser.page, emit);
       emit({ type: "status", status: "READY", message: "Navigation Test succeeded; browser remains open" });
     } catch (error) {
       emit({ type: "error", code: "NAV_TEST_FAILED", message: error instanceof Error ? error.message : String(error) });
@@ -54,7 +55,7 @@ while (true) {
     const request = queued.request ?? { target: "액체 펌프 제조업" };
     try {
       emit({ type: "status", status: "LOGIN_IN_PROGRESS", message: "Signing in to SMINFO" });
-      await ensureLoggedIn(page, request.credential, emit);
+      await ensureLoggedIn(browser.page, request.credential, emit);
       request.credential = undefined;
       emit({ type: "login_status", loggedIn: true, message: "SMINFO login succeeded" });
       emit({ type: "status", status: "READY", message: "SMINFO account is ready; company search page opened" });
@@ -73,16 +74,51 @@ while (true) {
   try {
     emit({ type: "status", status: "LOGIN_CHECKING", message: "Checking SMINFO login session" });
     const activeCredential=request.credential;
-    const loginMode = await ensureLoggedIn(page, activeCredential, emit);
+    const loginMode = await ensureLoggedIn(browser.page, activeCredential, emit);
     request.credential = undefined;
     emit({ type: "login_status", loggedIn: true,sessionStatus:"LOGGED_IN", message: loginMode === "SESSION_REUSED" ? "Existing SMINFO session reused" : "SMINFO automatic login succeeded" });
-    emit({ type: "status", status: "INDUSTRY_SEARCHING", message: `Searching SMINFO industry: ${request.target}` });
-    let industry = await resolveIndustry(page, request.target, emit, request.industryCode);
-    emit({ type: "status", status: "COMPANY_SEARCHING", message: `Searching companies: ${industry.name}` });
-    industry = await runCompanySearchWithRepair(page,industry,{target:request.target,preferredCode:request.industryCode},emit);
+    let industry:IndustryCandidate={name:request.target,code:request.industryCode};
+    const hardRecover=async(reason:string)=>{
+      while(true){
+        for(let attempt=1;attempt<=3;attempt++){
+          if(control.paused||control.stopped)throw new Error(control.paused?"COLLECTOR_PAUSED":"COLLECTOR_STOPPED");
+          emit({type:"recovery",status:"HARD_RECOVERY_BROWSER_RESTART",reason,attempt,maxAttempts:3,message:`closing and restarting collector browser attempt=${attempt}/3`});
+          await browser.context.close().catch(()=>undefined);
+          if(attempt>1)await new Promise(resolve=>setTimeout(resolve,5_000));
+          if(control.paused||control.stopped)throw new Error(control.paused?"COLLECTOR_PAUSED":"COLLECTOR_STOPPED");
+          try{
+            browser=await openPersistentSminfo(profile,emit);
+            const mode=await ensureLoggedIn(browser.page,activeCredential,emit);
+            emit({type:"login_status",loggedIn:true,sessionStatus:"LOGGED_IN",message:mode==="SESSION_REUSED"?"Existing login state verified":"SMINFO re-login succeeded"});
+            let selected=await resolveIndustry(browser.page,request.target,emit,request.industryCode??industry.code);
+            selected=await runCompanySearchWithRepair(browser.page,selected,{target:request.target,preferredCode:request.industryCode??industry.code},emit);
+            return {page:browser.page,industry:selected};
+          }catch(error){emit({type:"error",code:"HARD_RECOVERY_ATTEMPT_FAILED",attempt,message:error instanceof Error?error.message:String(error)})}
+        }
+        emit({type:"hard_recovery_cooldown",cooldown:300,status:"RECOVERY_COOLDOWN",message:"Hard Recovery 3회 실패 — 5분 cooldown 중 (자동 재시도 예정); hard_recovery_cooldown cooldown=300s"});
+        emit({type:"status",status:"RECOVERY_COOLDOWN",message:"Hard Recovery 3회 실패 — 5분 cooldown 중 (자동 재시도 예정)"});
+        const cooldownEndsAt=Date.now()+300_000;
+        while(Date.now()<cooldownEndsAt){
+          if(control.paused||control.stopped)throw new Error(control.paused?"COLLECTOR_PAUSED":"COLLECTOR_STOPPED");
+          await new Promise(resolve=>setTimeout(resolve,250));
+        }
+        emit({type:"hard_recovery_cooldown_ended",message:"Hard Recovery cooldown 종료 — 자동 복구 재시도"});
+        emit({type:"status",status:"RECOVERING",message:"Hard Recovery cooldown 종료 — 자동 복구 재시도"});
+      }
+    };
+    try{
+      emit({ type: "status", status: "INDUSTRY_SEARCHING", message: `Searching SMINFO industry: ${request.target}` });
+      industry = await resolveIndustry(browser.page, request.target, emit, request.industryCode);
+      emit({ type: "status", status: "COMPANY_SEARCHING", message: `Searching companies: ${industry.name}` });
+      industry = await runCompanySearchWithRepair(browser.page,industry,{target:request.target,preferredCode:request.industryCode},emit);
+    }catch(error){
+      if(!requiresHardRecovery(error))throw error;
+      ({industry}=await hardRecover(error instanceof Error?error.message:String(error)));
+    }
     const targetId = repo.upsertTarget(request.target, industry.code, industry.name);
-    await collectCurrentSearch(page, repo, emit, undefined, control, targetId,{credential:activeCredential,target:request.target,industry});
+    await collectCurrentSearch(browser.page, repo, emit, undefined, control, targetId,{credential:activeCredential,target:request.target,industry,hardRecover});
   } catch (error) {
+    if(control.paused||control.stopped)continue;
     const message=error instanceof Error ? error.message : String(error);
     const credentialRequired=message.includes("CREDENTIAL_REQUIRED");
     const targetInvalid=["TARGET_NOT_FOUND","INDUSTRY_SELECTION_REQUIRED","INDUSTRY_NOT_APPLIED","COMPANY_SEARCH_ZERO_RESULTS"].some(code=>message.includes(code));
@@ -103,5 +139,5 @@ while (true) {
 }
 
 control.dispose();
-await context.close().catch(()=>undefined);
+await browser.context.close().catch(()=>undefined);
 }

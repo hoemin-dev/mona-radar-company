@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { runNavigationTest } from "../browser/navigation-test.js";
+import { createDetailPage } from "../browser/detail-navigation.js";
 
 let browser: Browser;
 let context: BrowserContext;
@@ -74,6 +75,14 @@ afterAll(async () => {
 }, 30_000);
 
 describe("A-J single-page navigation diagnostic", () => {
+  it.skipIf(!process.env.RUN_BROWSER_TESTS)("names a reused blank page as the detail target", async () => {
+    const blank = await context.newPage();
+    expect(await blank.evaluate(() => window.name)).toBe("");
+    expect(await createDetailPage(searchPage)).toBe(blank);
+    expect(await blank.evaluate(() => window.name)).toBe("monaRadarDetail");
+    await blank.close();
+  });
+
   it.skipIf(!process.env.RUN_BROWSER_TESTS)("uses only visible company, list, and pagination UI", async () => {
     const events: string[] = [];
     await runNavigationTest(searchPage, (event) => {

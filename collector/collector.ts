@@ -8,14 +8,16 @@ import { RATE_LIMIT, SMINFO } from "./sminfo/constants.js";
 import type { CollectorControl } from "./control.js";
 import { captureCompanyDetailSections } from "./browser/detail-sections.js";
 import { createDetailPage, openCompanyDetail } from "./browser/detail-navigation.js";
-import { ensureLoggedIn, inspectBrowserState } from "./sminfo/session.js";
-import { resolveIndustry, runCompanySearchWithRepair, type IndustryCandidate } from "./sminfo/industry.js";
+import { inspectBrowserState } from "./sminfo/session.js";
+import type { IndustryCandidate } from "./sminfo/industry.js";
 import {restoreSearchPage} from "./browser/search-page-recovery.js";
+import {HardRecoveryRequired,requiresHardRecovery} from "./hard-recovery.js";
 
 type Emit = (event: unknown) => void;
-interface RecoveryOptions { credential?:{username:string;password:string};target:string;industry:IndustryCandidate }
-const MAX_RELOGIN_ATTEMPTS=2;
-const MAX_CONTEXT_RECOVERY_ATTEMPTS=2;
+interface RecoveryOptions { credential?:{username:string;password:string};target:string;industry:IndustryCandidate;hardRecover:(reason:string)=>Promise<{page:Page;industry:IndustryCandidate}> }
+const normalizedIdentityName=(value:string)=>value.replace(/\s/g,"").toLocaleLowerCase();
+export const detailIdentityMatches=(detail:{kcd:string;companyName:string},expected:{kcd:string;companyName:string})=>
+  detail.kcd ? detail.kcd===expected.kcd : Boolean(detail.companyName)&&normalizedIdentityName(detail.companyName)===normalizedIdentityName(expected.companyName);
 const restricted = (text: string, status?: number) =>
   status === 403 || status === 429 || /\uC811\uC18D\s*\uC81C\uD55C|\uBE44\uC815\uC0C1\s*\uC811\uADFC|\uB85C\uADF8\uC778.*(?:\uD544\uC694|\uB9CC\uB8CC)/.test(text);
 
@@ -29,7 +31,7 @@ async function companyLink(page:Page,kcd:string){
 export type CollectorErrorClass="SKIP"|"COMPANY_ERROR"|"SYSTEM_ERROR";
 export function classifyCollectorError(code:string):CollectorErrorClass{
   if(code==="DISCLOSURE_DENIED"||code==="PRIVATE")return "SKIP";
-  if(code==="COMPANY_LINK_NOT_FOUND"||code==="DETAIL_NAVIGATION_TIMEOUT"||code==="DETAIL_FAILED"||code==="ACCESS_RESTRICTED")return "COMPANY_ERROR";
+  if(code==="COMPANY_LINK_NOT_FOUND"||code==="DETAIL_NAVIGATION_TIMEOUT"||code==="DETAIL_FAILED"||code==="DETAIL_IDENTITY_MISMATCH"||code==="ACCESS_RESTRICTED")return "COMPANY_ERROR";
   return "SYSTEM_ERROR";
 }
 
@@ -38,38 +40,13 @@ export function classifyNavigationState(state:Awaited<ReturnType<typeof inspectB
   if(/PAGINATION_|SEARCH_PAGE_STATE_MISMATCH|SEARCH_RESULT_STATE_LOST/.test(original))return {code:"SEARCH_PAGE_STATE_MISMATCH",state};
   if(state.path!==SMINFO.searchPath&&!state.detailPage)return {code:"SEARCH_CONTEXT_LOST",state};
   if(original.includes("COMPANY_LINK_NOT_FOUND"))return {code:"COMPANY_LINK_NOT_FOUND",state};
-  if(original.includes("Timeout")||original.includes("timeout"))return {code:"DETAIL_NAVIGATION_TIMEOUT",state};
+  if(original.includes("DETAIL_IDENTITY_MISMATCH"))return {code:"DETAIL_IDENTITY_MISMATCH",state};
+  if(original.includes("DETAIL_NAVIGATION_TIMEOUT")||/timeout/i.test(original))return {code:"DETAIL_NAVIGATION_TIMEOUT",state};
   return {code:"UNKNOWN_NAVIGATION_STATE",state};
 }
 async function classifyNavigationFailure(page:Page,original:string){return classifyNavigationState(await inspectBrowserState(page),original)}
 export const isRecoverableNavigationCode=(code:string)=>code==="SESSION_EXPIRED"||code==="SEARCH_CONTEXT_LOST"||code==="SEARCH_PAGE_STATE_MISMATCH";
 export const recoveryFailureCode=(message:string)=>message.includes("CREDENTIAL_REQUIRED")?"CREDENTIAL_REQUIRED":message.includes("LOGIN_STATE_UNCERTAIN")?"LOGIN_STATE_UNCERTAIN":message.includes("LOGIN_FAILED")?"LOGIN_FAILED":"SEARCH_CONTEXT_RECOVERY_FAILED";
-
-async function recoverSearchContext(page:Page,repo:Repository,job:string,item:{collection_item_id:string;sminfo_kcd:string;company_name_snapshot:string;source_page_number?:number},options:RecoveryOptions,emit:Emit,cause:"SESSION_EXPIRED"|"SEARCH_CONTEXT_LOST"|"SEARCH_PAGE_STATE_MISMATCH"){
-  const state=await inspectBrowserState(page);
-  emit({type:"recovery",status:cause,message:cause==="SESSION_EXPIRED"?"SMINFO login session expired":"SMINFO search context was lost",kcd:item.sminfo_kcd,url:state.url});
-  repo.event(job,item.collection_item_id,cause,`kcd=${item.sminfo_kcd} url=${state.url}`);
-  if(!options.credential)throw new Error("CREDENTIAL_REQUIRED");
-  let loggedIn=false;let loginError="";
-  for(let attempt=1;attempt<=MAX_RELOGIN_ATTEMPTS;attempt++){
-    emit({type:"recovery",status:"REAUTHENTICATING",message:"Saved credential found; automatic re-login started",attempt,kcd:item.sminfo_kcd});
-    repo.event(job,item.collection_item_id,"RELOGIN_STARTED",`attempt=${attempt} kcd=${item.sminfo_kcd}`);
-    try{await ensureLoggedIn(page,options.credential,emit);loggedIn=true;repo.event(job,item.collection_item_id,"RELOGIN_SUCCESS",`attempt=${attempt} kcd=${item.sminfo_kcd}`);emit({type:"login_status",loggedIn:true,sessionStatus:"LOGGED_IN",message:"Automatic re-login succeeded"});break}catch(error){loginError=error instanceof Error?error.message:String(error);repo.event(job,item.collection_item_id,"RELOGIN_FAILED",`attempt=${attempt} kcd=${item.sminfo_kcd} error=${loginError}`)}
-  }
-  if(!loggedIn)throw new Error(`LOGIN_FAILED ${loginError}`);
-  for(let attempt=1;attempt<=MAX_CONTEXT_RECOVERY_ATTEMPTS;attempt++){
-    emit({type:"recovery",status:"REBUILDING_SEARCH_CONTEXT",message:"Rebuilding Target search context",attempt,kcd:item.sminfo_kcd});
-    emit({type:"search_context_mode",mode:"rebuilt",reason:cause==="SESSION_EXPIRED"?"session_recovery":"search_recovery",message:`search_context_mode mode=rebuilt reason=${cause==="SESSION_EXPIRED"?"session_recovery":"search_recovery"}`});
-    repo.event(job,item.collection_item_id,"SEARCH_CONTEXT_RECOVERY_STARTED",`attempt=${attempt} kcd=${item.sminfo_kcd}`);
-    try{
-      const industry=await resolveIndustry(page,options.target,emit,options.industry.code);
-      await runCompanySearchWithRepair(page,industry,{target:options.target,preferredCode:options.industry.code},emit);
-      repo.event(job,item.collection_item_id,"SEARCH_CONTEXT_RECOVERY_SUCCESS",`attempt=${attempt} kcd=${item.sminfo_kcd}`);
-      emit({type:"recovery",status:"RESUMING_COLLECTION",message:`Search context restored; resuming kcd=${item.sminfo_kcd}`,kcd:item.sminfo_kcd});
-      return true;
-    }catch(error){const message=error instanceof Error?error.message:String(error);repo.event(job,item.collection_item_id,"SEARCH_CONTEXT_RECOVERY_FAILED",`attempt=${attempt} kcd=${item.sminfo_kcd} error=${message}`);if(attempt===MAX_CONTEXT_RECOVERY_ATTEMPTS)throw new Error(`SEARCH_CONTEXT_RECOVERY_FAILED ${message}`)}
-  }
-}
 
 async function clickListAndRestore(page: Page, workPage: number,emit:Emit) {
   const textButton = page.getByText("\uBAA9\uB85D", { exact: true }).filter({ visible: true }).first();
@@ -113,21 +90,32 @@ export async function collectCurrentSearch(
   let detailPage: Page | undefined;
   let restartRequired=false;
   let restartReason="";
+  let hardRecoveryFailures=0;
   let seenResumeGeneration=control.currentResumeGeneration();
+  const performHardRecovery=async(reason:string)=>{
+    if(!recovery)throw new HardRecoveryRequired(`${reason}; recovery options unavailable`);
+    await resetDetailPage();
+    emit({type:"recovery",status:"HARD_RECOVERY_STARTED",reason,message:`hard recovery started reason=${reason}`});
+    try{
+      const rebuilt=await recovery.hardRecover(reason);
+      page=rebuilt.page;recovery.industry=rebuilt.industry;hardRecoveryFailures=0;consecutiveSystemErrors=0;
+      restartRequired=true;restartReason=`hard_recovery:${reason}`;
+      emit({type:"recovery",status:"HARD_RECOVERY_SUCCEEDED",message:"hard recovery succeeded; restarting search from page=1"});
+    }catch(error){
+      hardRecoveryFailures++;
+      throw new HardRecoveryRequired(`${reason}; attempt=${hardRecoveryFailures}; ${error instanceof Error?error.message:String(error)}`);
+    }
+  };
   const validateManualResume=async(pageNumber?:number,item?:{sminfo_kcd:string;company_name_snapshot:string})=>{
     const generation=control.currentResumeGeneration();if(generation===seenResumeGeneration)return;
     seenResumeGeneration=generation;consecutiveSystemErrors=0;
     emit({type:"recovery",status:"RESUME_REQUESTED",message:"resume requested"});
     emit({type:"recovery",status:"RECOVERY_STATE_RESET",message:"recovery state reset; system error count 0/3"});
-    const state=await inspectBrowserState(page);
-    emit({type:"recovery",status:"BROWSER_STATE_DETECTED",message:`browser state detected session=${state.sessionStatus} url=${state.url} searchResults=${state.searchResults}`});
-    if(!recovery)throw new Error("SEARCH_CONTEXT_RECOVERY_FAILED recovery options unavailable");
-    await ensureLoggedIn(page,recovery.credential,emit);
-    emit({type:"search_context_mode",mode:"rebuilt",reason:"manual_resume",message:"search_context_mode mode=rebuilt reason=manual_resume"});
-    const industry=await resolveIndustry(page,recovery.target,emit,recovery.industry.code);
-    await runCompanySearchWithRepair(page,industry,{target:recovery.target,preferredCode:recovery.industry.code},emit);
-    restartRequired=true;restartReason="manual_resume";
-    emit({type:"recovery",status:"SEARCH_PAGE_RECOVERED",message:"search page rebuilt from page=1"});
+    const state=page.isClosed()?undefined:await inspectBrowserState(page).catch(()=>undefined);
+    emit({type:"recovery",status:"BROWSER_STATE_DETECTED",message:`browser state detected session=${state?.sessionStatus??"BROKEN"} url=${state?.url??"unavailable"} searchResults=${state?.searchResults??false}`});
+    const healthy=Boolean(state&&state.sessionStatus==="LOGGED_IN"&&state.path===SMINFO.searchPath&&state.searchResults&&page.context().pages().filter(candidate=>!candidate.isClosed()).length===1);
+    if(healthy){emit({type:"recovery",status:"CONTEXT_HEALTHY",message:"resume kept the current search page and position"});return;}
+    await performHardRecovery("MANUAL_RESUME_CONTEXT_UNHEALTHY");
     if(item)emit({type:"recovery",status:"RESUMING_COLLECTION",message:`resume collection from company ${item.company_name_snapshot} kcd=${item.sminfo_kcd}`});
   };
   const checkpoint=async(pageNumber?:number,item?:{sminfo_kcd:string;company_name_snapshot:string})=>{
@@ -136,7 +124,8 @@ export async function collectCurrentSearch(
       try{await validateManualResume(pageNumber,item);return}catch(error){
         const message=error instanceof Error?error.message:String(error);consecutiveSystemErrors++;
         emit({type:"error",code:"SEARCH_CONTEXT_RECOVERY_FAILED",errorClass:"SYSTEM_ERROR",message:`manual resume recovery failed: ${message}; system error count ${consecutiveSystemErrors}/${RATE_LIMIT.maxConsecutiveErrors}`});
-        control.pauseForRecovery();repo.jobStatus(job,"PAUSED");emit({type:"status",status:"PAUSED",message:`pause reason=SEARCH_CONTEXT_RECOVERY_FAILED; retry Resume after checking browser`});
+        if(hardRecoveryFailures>=3){repo.jobStatus(job,"ERROR");throw error}
+        await wait(5_000);
       }
     }
   };
@@ -154,19 +143,8 @@ export async function collectCurrentSearch(
   };
   const restoreWithSearchRecovery=async(targetPage:number)=>{
     try{await restoreSearchPage(page,targetPage,emit);return false}catch(firstError){
-      if(!recovery)throw firstError;
-      const pages=page.context().pages();const state=await inspectBrowserState(page);const resultCount=await page.locator("a[onclick*='onMoveView01']").filter({visible:true}).count().catch(()=>0);const searchButtonCount=await page.locator('button.btn.btn_blue[onclick*="doSelect"]').filter({visible:true,hasText:/^\s*검색\s*$/}).count().catch(()=>0);const body=await page.locator("body").innerText().catch(()=>"");const actualPage=await readVisiblePageNumber(page);const conditionPresent=/선택한\s*조건/.test(body)&&body.includes(recovery.industry.name);const searchConditionLost=resultCount===0&&!conditionPresent;const searchPageIncomplete=state.sessionStatus==="LOGGED_IN"&&state.path===SMINFO.searchPath&&conditionPresent&&resultCount===0&&searchButtonCount===0;const diagnosticReason=searchPageIncomplete?"search_page_incomplete":searchConditionLost?"search_condition_lost":"pagination_state_lost";
-      emit({type:"search_recovery_diagnostic",reason:diagnosticReason,target:recovery.target,expectedPage:targetPage,actualPage,currentUrl:page.url(),popupPresent:pages.some(candidate=>candidate!==page&&!candidate.isClosed()),popupUrls:pages.filter(candidate=>candidate!==page&&!candidate.isClosed()).map(candidate=>candidate.url()),conditionPresent,resultCount,searchButtonCount,session:state.sessionStatus,message:`search_recovery_diagnostic reason=${diagnosticReason} target=${recovery.target} expectedPage=${targetPage} actualPage=${actualPage??"unknown"} conditionPresent=${conditionPresent} resultCount=${resultCount} searchButtonCount=${searchButtonCount} session=${state.sessionStatus}`});
-      if(!searchConditionLost&&!searchPageIncomplete)throw firstError;
-      emit({type:"status",status:"RECOVERING",message:`search_recovery_started targetPage=${targetPage}`});
-      try{
-        await ensureLoggedIn(page,recovery.credential,emit);
-        emit({type:"search_context_mode",mode:"rebuilt",reason:diagnosticReason,message:`search_context_mode mode=rebuilt reason=${diagnosticReason}`});
-        const industry=await resolveIndustry(page,recovery.target,emit,recovery.industry.code);
-        await runCompanySearchWithRepair(page,industry,{target:recovery.target,preferredCode:recovery.industry.code},emit);
-        emit({type:"status",status:"RUNNING",message:"search_recovery_success page=1"});
-        return true;
-      }catch(error){const reason=error instanceof Error?error.message:String(error);throw new Error(`SEARCH_RECOVERY_FAILED reason=${reason} targetPage=${targetPage} target=${recovery.target}`)}
+      await performHardRecovery(`PAGINATION_OR_SEARCH_RESTORE_FAILED target=${targetPage} cause=${firstError instanceof Error?firstError.message:String(firstError)}`);
+      return true;
     }
   };
 
@@ -235,8 +213,10 @@ export async function collectCurrentSearch(
           emit({ type: "status", status: "RUNNING", companyName:item.company_name_snapshot,kcd:item.sminfo_kcd,message: `Collecting ${item.company_name_snapshot}` });
           detailPage=await openCompanyDetail(page,detailPage,item.sminfo_kcd);
           const html = await captureCompanyDetailSections(detailPage,emit);
+          if (/정상적인\s*화면\s*접근\s*방법이\s*아닙니다|비정상\s*접근/.test(html)) throw new HardRecoveryRequired("ABNORMAL_ACCESS_PAGE");
           if (restricted(html)) throw new Error("ACCESS_RESTRICTED");
           const detail = parseCompanyDetail(html);
+          if(!detailIdentityMatches(detail,{kcd:item.sminfo_kcd,companyName:item.company_name_snapshot}))throw new Error(`DETAIL_IDENTITY_MISMATCH expected_kcd=${item.sminfo_kcd} actual_kcd=${detail.kcd||"missing"}`);
           if (!detail.kcd) detail.kcd = item.sminfo_kcd;
           if (!detail.companyName) detail.companyName = item.company_name_snapshot;
           emit({type:"detail_parsed",companyName:detail.companyName,message:`Detail parsed: quality=${detail.collectionQuality}, sections=${Object.entries(detail.sectionStatuses).map(([name,result])=>`${name}:${result.status}`).join(",")}, financials=${detail.financialStatements.length}, sites=${detail.businessSites?.length??0}, histories=${detail.histories?.length??0}, executives=${detail.executives?.length??0}, certifications=${detail.certifications?.length??0}, designations=${detail.designations?.length??0}`});
@@ -266,30 +246,29 @@ export async function collectCurrentSearch(
             return;
           }
           const classified=await classifyNavigationFailure(page,message);
-          if(recovery&&isRecoverableNavigationCode(classified.code)&&recoveryAttempts<1){
+          if(recovery&&(isRecoverableNavigationCode(classified.code)||requiresHardRecovery(error))&&recoveryAttempts<1){
             recoveryAttempts++;
             emit({type:"status",status:"RECOVERING",message:"SMINFO session expired; recovering automatically"});
-            try{await recoverSearchContext(page,repo,job,item,recovery,emit,classified.code);consecutiveSystemErrors=0;restartRequired=true;restartReason=classified.code==="SESSION_EXPIRED"?"session_recovery":"search_recovery";repo.event(job,item.collection_item_id,"COLLECTION_RESUMED",`kcd=${item.sminfo_kcd}`);continue searchPages}catch(recoveryError){
+            try{await performHardRecovery(classified.code);repo.event(job,item.collection_item_id,"COLLECTION_RESUMED",`kcd=${item.sminfo_kcd}`);continue searchPages}catch(recoveryError){
+              if(control.paused||control.stopped)throw recoveryError;
               const recoveryMessage=recoveryError instanceof Error?recoveryError.message:String(recoveryError);
               const recoveryCode=recoveryFailureCode(recoveryMessage);
               consecutiveSystemErrors++;
               emit({type:"error",code:recoveryCode,message:`${recoveryMessage}; system error count ${consecutiveSystemErrors}/${RATE_LIMIT.maxConsecutiveErrors}`});
-              control.pauseForRecovery();repo.jobStatus(job,"PAUSED");emit({type:"status",status:"PAUSED",message:`pause reason=${recoveryCode}; browser/search recovery required`});return;
+              repo.jobStatus(job,"ERROR");emit({type:"status",status:"ERROR",message:`hard recovery failed after bounded retries: ${recoveryCode}`});return;
             }
           }
           const effectiveCode=message.includes("DISCLOSURE_DENIED")?"DISCLOSURE_DENIED":message==="ACCESS_RESTRICTED"?"ACCESS_RESTRICTED":classified.code === "UNKNOWN_NAVIGATION_STATE" ? "DETAIL_FAILED" : classified.code;
           const errorClass=classifyCollectorError(effectiveCode);
+          if(errorClass==="SYSTEM_ERROR"){
+            await performHardRecovery(`${effectiveCode} ${message}`);
+            continue searchPages;
+          }
           if(errorClass==="SKIP")try{repo.skipDisclosureDenied(item.collection_item_id,"업체가 요청 정보비공개 업체입니다.")}catch(dbError){const dbMessage=dbError instanceof Error?dbError.message:String(dbError);emit({type:"db_write_failed",operation:"skipDisclosureDenied",companyName:item.company_name_snapshot,kcd:item.sminfo_kcd,error:dbMessage,message:`db_write_failed operation=skipDisclosureDenied company=${item.company_name_snapshot} kcd=${item.sminfo_kcd} error=${dbMessage}`});throw dbError}else repo.fail(item.collection_item_id,effectiveCode,`${message} url=${classified.state.url}`);
-          if(errorClass==="SYSTEM_ERROR")consecutiveSystemErrors++;else consecutiveSystemErrors=0;
-          emit({ type:errorClass==="SKIP"?"company_skipped":"error",companyName:item.company_name_snapshot,kcd:item.sminfo_kcd,sourcePage:item.source_page_number,actualPage:classified.state.path===SMINFO.searchPath?await readVisiblePageNumber(page):undefined,url:classified.state.url, code:effectiveCode,errorClass, message:`${message} url=${classified.state.url}${errorClass==="SYSTEM_ERROR"?`; system error count ${consecutiveSystemErrors}/${RATE_LIMIT.maxConsecutiveErrors}`:""}` });
+          consecutiveSystemErrors=0;
+          emit({ type:errorClass==="SKIP"?"company_skipped":"error",companyName:item.company_name_snapshot,kcd:item.sminfo_kcd,sourcePage:item.source_page_number,actualPage:classified.state.path===SMINFO.searchPath?await readVisiblePageNumber(page):undefined,url:classified.state.url, code:effectiveCode,errorClass, message:`${message} url=${classified.state.url}` });
           await resetDetailPage();
           await verifyDetailReturn(item.source_page_number).catch(() => undefined);
-          if (errorClass==="SYSTEM_ERROR"&&consecutiveSystemErrors >= RATE_LIMIT.maxConsecutiveErrors) {
-            control.pauseForRecovery();
-            repo.jobStatus(job, "PAUSED");
-            emit({ type: "status", status: "PAUSED", message: `pause reason=${effectiveCode}; system error count ${consecutiveSystemErrors}/${RATE_LIMIT.maxConsecutiveErrors}` });
-            return;
-          }
           break;
         }
       }
@@ -299,11 +278,13 @@ export async function collectCurrentSearch(
     if (targetId) repo.targetStatus(targetId, result.status);
     emit({ type: "status", status: result.status, message: result.status === "COMPLETED" ? "Collection completed" : `Collection completed with ${result.failed} failure(s)` });
   } catch (error) {
-    const message=error instanceof Error?error.message:String(error);
-    if(/PAGINATION_|SEARCH_PAGE_STATE_MISMATCH|SEARCH_RESULT_STATE_LOST|SEARCH_RECOVERY_FAILED/.test(message)){
-      control.pauseForRecovery();repo.jobStatus(job,"PAUSED");if(targetId)repo.targetStatus(targetId,"PAUSED");
-      emit({type:"status",status:"PAUSED",message:`search_recovery_failed; queue consumption stopped; ${message}`});return;
+    if(control.paused||control.stopped){
+      const interruptedStatus=control.paused?"PAUSED":"STOPPED";
+      repo.jobStatus(job,interruptedStatus);
+      if(targetId)repo.targetStatus(targetId,interruptedStatus);
+      return;
     }
+    const message=error instanceof Error?error.message:String(error);
     repo.jobStatus(job, "ERROR");
     if (targetId) repo.targetStatus(targetId, "ERROR");
     throw error;

@@ -376,6 +376,7 @@ fn stop_collection(state: State<CollectorProcess>) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app=tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(CollectorProcess(Mutex::new(None)))
         .manage(IndustryProcess(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![initialize_database, search_companies, get_company_detail, list_collector_targets, search_industry_codes, industry_master_status, refresh_industry_master, credential_status, save_sminfo_credential, delete_sminfo_credential, open_collector, login_sminfo, start_collection, pause_collection, resume_collection, stop_collection, run_navigation_test])

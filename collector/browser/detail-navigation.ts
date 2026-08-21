@@ -4,8 +4,7 @@ import { SMINFO } from "../sminfo/constants.js";
 const DETAIL_WINDOW_NAME="monaRadarDetail";
 export async function createDetailPage(searchPage:Page):Promise<Page>{
  const existing=searchPage.context().pages().find(candidate=>candidate!==searchPage&&!candidate.isClosed()&&candidate.url()==="about:blank");
- if(existing) return existing;
- const detailPage=await searchPage.context().newPage();
+ const detailPage=existing??await searchPage.context().newPage();
  await detailPage.evaluate(name=>{window.name=name},DETAIL_WINDOW_NAME);
  await searchPage.bringToFront();
  return detailPage;
